@@ -196,6 +196,14 @@ static bool readValidStore(MapStore& store) {
   return true;
 }
 
+// 保存済みstoreの内容がテーブルsrc（CRCはcrc）と一致するか。
+// CRCは16bitで衝突しうるため、エントリ本体まで突き合わせる。
+static bool storeMatches(const MapStore& store, const MapTable& src, uint16_t crc) {
+  return store.count == src.count &&
+         store.crc   == crc &&
+         memcmp(store.entries, src.e, (size_t)src.count * sizeof(MapEntry)) == 0;
+}
+
 bool mapEepromValid() {
   MapStore store;
   return readValidStore(store);
@@ -213,28 +221,42 @@ bool mapLoadFromEEPROM() {
   return true;
 }
 
-bool mapSaveToEEPROM() {
+MapSaveResult mapSaveToEEPROM() {
   const MapTable& src = mapGetActive();
-  if (validateTable(src.e, src.count) != MAP_OK) return false;
+  if (validateTable(src.e, src.count) != MAP_OK) return MAP_SAVE_FAILED;
 
-  MapStore store;
-  memset(&store, 0, sizeof(store));
-  store.magic   = MAP_MAGIC;
-  store.version = MAP_VERSION;
-  store.count   = src.count;
-  store.crc     = mapCrc16(src.e, src.count);
-  memcpy(store.entries, src.e, (size_t)src.count * sizeof(MapEntry));
+  const uint16_t crc = mapCrc16(src.e, src.count);
 
-  EEPROM.put(MAP_EEPROM_ADDR, store);
+  // 既に同じ内容が保存されているならデータフラッシュの摩耗を避けるため書き込まない。
+  // readValidStore() は magic/version/検証/CRC を全て見るので、未初期化・破損・
+  // バージョン違いの場合はここを素通りして通常の書き込み経路へ進む。
+  {
+    MapStore current;
+    if (readValidStore(current) && storeMatches(current, src, crc)) {
+      mapSource = MAP_SRC_EEPROM;
+      return MAP_SAVE_UNCHANGED;
+    }
+  }
+
+  {
+    MapStore store;
+    memset(&store, 0, sizeof(store));
+    store.magic   = MAP_MAGIC;
+    store.version = MAP_VERSION;
+    store.count   = src.count;
+    store.crc     = crc;
+    memcpy(store.entries, src.e, (size_t)src.count * sizeof(MapEntry));
+
+    EEPROM.put(MAP_EEPROM_ADDR, store);
+  }
 
   // 書き戻しを読み返して検証
   MapStore verify;
-  if (!readValidStore(verify))       return false;
-  if (verify.crc != store.crc)       return false;
-  if (verify.count != store.count)   return false;
+  if (!readValidStore(verify))                return MAP_SAVE_FAILED;
+  if (!storeMatches(verify, src, crc))        return MAP_SAVE_FAILED;
 
   mapSource = MAP_SRC_EEPROM;
-  return true;
+  return MAP_SAVE_WRITTEN;
 }
 
 //-----------------------------------------------------------------------------

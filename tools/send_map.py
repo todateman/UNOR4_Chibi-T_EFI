@@ -150,8 +150,12 @@ def transfer(ser: serial.Serial, rows, save: bool):
     print("RAMへ反映しました（読み戻し検証OK）")
 
     if save:
-        send_line(ser, "MAP SAVE", timeout=SAVE_TIMEOUT)
-        print("EEPROMへ保存しました")
+        ack, _ = send_line(ser, "MAP SAVE", timeout=SAVE_TIMEOUT)
+        if "UNCHANGED" in ack:
+            # 保存済み内容と同一。データフラッシュの摩耗を避けるため書き込まれていない。
+            print("EEPROMの内容は同一のため書き込みませんでした")
+        else:
+            print("EEPROMへ保存しました")
     else:
         print("EEPROMには保存していません（--save で永続化）")
 

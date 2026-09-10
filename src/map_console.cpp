@@ -134,7 +134,7 @@ static void cmdHelp() {
   Serial.println(F("MAP END               validate and apply atomically"));
   Serial.println(F("MAP ABORT             discard the session"));
   Serial.println(F("MAP SET r i g         change one row live"));
-  Serial.println(F("MAP SAVE              store to EEPROM (engine stopped only)"));
+  Serial.println(F("MAP SAVE              store to EEPROM (stopped only, skip if same)"));
   Serial.println(F("MAP LOAD              reload from EEPROM"));
   Serial.println(F("MAP DEFAULT           restore built-in default map"));
   replyOk("HELP");
@@ -146,10 +146,10 @@ static void cmdSave() {
     replyErr("ENGINE_RUNNING");
     return;
   }
-  if (mapSaveToEEPROM()) {
-    replyOk("SAVED");
-  } else {
-    replyErr("EEPROM_WRITE_FAILED");
+  switch (mapSaveToEEPROM()) {
+    case MAP_SAVE_WRITTEN:   replyOk("SAVED");     break;
+    case MAP_SAVE_UNCHANGED: replyOk("UNCHANGED"); break;  // 内容が同一で未書き込み
+    default:                 replyErr("EEPROM_WRITE_FAILED"); break;
   }
 }
 

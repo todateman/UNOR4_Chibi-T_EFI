@@ -41,6 +41,13 @@ enum MapSource : uint8_t {
   MAP_SRC_SERIAL  = 2   // シリアル転送で書き換え（未保存）
 };
 
+// EEPROM保存の結果
+enum MapSaveResult : uint8_t {
+  MAP_SAVE_WRITTEN = 0,   // EEPROMへ書き込んだ
+  MAP_SAVE_UNCHANGED,     // 保存済み内容と同一のため書き込まなかった
+  MAP_SAVE_FAILED         // 検証エラー、または書き戻し検証に失敗
+};
+
 // 検証結果
 enum MapValidation : uint8_t {
   MAP_OK = 0,
@@ -107,8 +114,10 @@ bool mapEepromValid();
 bool mapLoadFromEEPROM();
 
 // 現在のRAM MAPをEEPROMへ保存。
+// 既に保存されている内容と同一ならデータフラッシュの摩耗を避けるため書き込まず、
+// MAP_SAVE_UNCHANGED を返す。
 // 注意: 数msのブロッキングが発生するため、エンジン停止時のみ呼ぶこと。
-bool mapSaveToEEPROM();
+MapSaveResult mapSaveToEEPROM();
 
 //-----------------------------------------------------------------------------
 // CSV行パース（シリアル転送とSD読み込みで共用）

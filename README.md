@@ -208,7 +208,7 @@ python tools/send_map.py map.csv --port /dev/cu.usbmodem1101
 | `MAP END` | 検証して原子的に反映。失敗時は破棄され現在の MAP は無傷 | 可 |
 | `MAP ABORT` | セッション破棄 | 可 |
 | `MAP SET <rpm> <inj> <ign>` | 1 行だけライブ変更（該当 RPM が無ければ昇順を保って挿入） | 可 |
-| `MAP SAVE` | EEPROM へ保存 | **不可** |
+| `MAP SAVE` | EEPROM へ保存（既存内容と同一なら書き込まず `OK UNCHANGED`） | **不可** |
 | `MAP LOAD` | EEPROM から読み直して RAM へ反映 | 可 |
 | `MAP DEFAULT` | 内蔵 `defaultMap` へ戻す（EEPROM は変更しない） | 可 |
 | `HELP` | コマンド一覧 | 可 |
@@ -227,6 +227,9 @@ python tools/send_map.py map.csv --port /dev/cu.usbmodem1101
 - UNO R4 Minima の RA4M1 データフラッシュ 8KB（消去単位 1KB）を Arduino `EEPROM` ライブラリ経由で使用。
 - 先頭 1 ブロック内に magic / version / 行数 / CRC-16 / エントリを格納（約 152 バイト）。  
   CRC 不一致・magic 不一致なら内蔵 `defaultMap` へ自動フォールバックする。
+- `MAP SAVE` は書き込み前に EEPROM 上の内容と行数 / CRC / エントリ本体を突き合わせ、**同一なら書き込みを行わず** `OK UNCHANGED` を返す（データフラッシュの摩耗対策）。  
+  なお構造体一括の書き込みには `EEPROM.put` を使うこと。  
+  `EEPROM.update` はバイト単位 API で、差分 1 バイトごとに 1KB ページの消去＋書き込みが走るため摩耗対策として逆効果になる。
 - **`MAP SAVE` はエンジン停止時（`ENG_ON == false` かつ `tachoRpm == 0`）のみ受理**し、それ以外は `ERR ENGINE_RUNNING` を返す。  
   データフラッシュの消去・書き込みは数 ms ブロックするため、 24µs 周期の点火・噴射制御中に実行してはならない。
 

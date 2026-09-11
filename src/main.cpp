@@ -4,6 +4,8 @@
 #include "fastestdigitalRW.hpp"  :contentReference[oaicite:0]{index=0}
 #include "AGTimerR4.h"
 #include <Arduino_FreeRTOS.h>
+#include "map_store.h"
+#include "map_console.h"
 
 // IRAM_ATTR が未定義の場合は空定義を追加（ESP32等でなければ不要）
 #ifndef IRAM_ATTR
@@ -77,6 +79,10 @@ volatile unsigned long speed        = 0;  // WH_INの速度（0.1 km/h 単位）
 bool ENG_ON                          = false; // エンジンONフラグ（キルスイッチに連動）
 volatile uint8_t  calculatedINJ_time = 0; // 燃料噴射時間（x0.1ms）
 volatile int16_t  calculatedIGN_CA   = 0; // 点火進角角度（CA）
+// MAP最終行を超える回転数（レブリミット相当）で true。
+// calculatedIGN_CA==0 は「0の値が入ったMAP行」と区別できないため、
+// 点火・噴射の新規トリガ可否はこのフラグで判定する（進行中のON_HOLDは止めない）。
+volatile bool     mapOutOfRange      = false;
 volatile int16_t  Dwell_Time_CA      = 0; // ドゥエル時間（IGコイルへの充電時間）をクランク角度（CA）へ変換
 volatile int16_t  INJ_STR_CA         = 0; // 燃料噴射開始タイミング角度（CA）※INJ_END_CAと噴射時間から逆算
 volatile uint8_t  INJ_Status         = 1; // 燃料噴射状態（0:OFF, 1:ON, 2:ON_HOLD）
@@ -108,32 +114,13 @@ volatile uint16_t worktime = 0;           // エンジン稼働時間（秒）
 volatile float usecperdig = 1.0;          // NE_A_INの1パルスあたりの時間（us）
 
 //-----------------------------------------------------------------------------
-// MAPテーブル（SD未使用の場合のデフォルトMAP）
+// MAPテーブル
+//
+// 実体は map_store.cpp のダブルバンク（mapGetActive()で参照）。
+// 内蔵デフォルトMAPは defaultMap[]、EEPROMに有効なMAPがあればそちらが優先される。
+// 書き換えは USBシリアル経由（map_console.cpp / tools/send_map.py）で行い、
+// ビルドし直さずに調整できる。
 //-----------------------------------------------------------------------------
-struct MapEntry {
-  uint16_t rpm;
-  uint8_t inj_time;
-  uint16_t ign_ca;
-};
-
-const MapEntry defaultMap[] = {
-  {400,  40, 15},
-  {800,  40, 15},
-  {1200, 40, 15},
-  {1600, 40, 15},
-  {2000, 44, 20},
-  {2400, 44, 20},
-  {2800, 44, 25},
-  {3200, 42, 25},
-  {3600, 40, 25},
-  {4000, 40, 30},
-  {4400, 40, 30},
-  {4800, 40, 30},
-  {5200, 40, 30},
-  {5600, 40, 30},
-  {6000, 40, 30}
-};
-const uint8_t defaultMapSize = sizeof(defaultMap) / sizeof(defaultMap[0]);
 
 //-----------------------------------------------------------------------------
 // 関数宣言（詳細実装は下部）
@@ -252,24 +239,26 @@ void updateEngineMap() {
   if (startState == LOW) {
     calculatedINJ_time = start_INJ_time;
     calculatedIGN_CA   = start_IGN_CA;
+    mapOutOfRange = false;
   }
   // スタータOFFの場合
   else {
-    if (SDMapEnabled) {
-      // SDカードMAP読み込みの場合（parseCSV()でロードしたデータを利用）
-      // ここでは未実装（必要なら実装）
-    } else {
-      for (uint8_t i = 0; i < defaultMapSize; i++) {
-        if (tachoRpm < defaultMap[i].rpm) {
-          calculatedINJ_time = defaultMap[i].inj_time;
-          calculatedIGN_CA   = defaultMap[i].ign_ca;
-          return;
-        }
+    // アクティブバンクを1回だけ取得する。バンク切替は非アクティブ側を完成させてから
+    // 1バイトのストアで行われるため、参照中にテーブルが壊れることはない。
+    const MapTable &map = mapGetActive();
+    for (uint8_t i = 0; i < map.count; i++) {
+      if (tachoRpm < map.e[i].rpm) {
+        calculatedINJ_time = map.e[i].inj_time;
+        calculatedIGN_CA   = map.e[i].ign_ca;
+        mapOutOfRange = false;
+        return;
       }
-      calculatedINJ_time = 0;
-      calculatedIGN_CA   = 0;
-      return;
     }
+    // MAP上限を超える回転数では燃料噴射・点火を止める
+    calculatedINJ_time = 0;
+    calculatedIGN_CA   = 0;
+    mapOutOfRange = true;
+    return;
   }
 }
 
@@ -376,8 +365,8 @@ void Routine() {
     inj360Reset = true;
   }
 
-  // 燃料噴射制御 
-  if (ENG_ON && INJ_Status == 1 && !INJ_His) {
+  // 燃料噴射制御
+  if (ENG_ON && INJ_Status == 1 && !INJ_His && !mapOutOfRange) {
     // 燃料噴射タイミングに達したらON
     if (Ne_deg >= INJ_STR_CA) {
       timeNow_INJ_ON = micros();
@@ -403,7 +392,7 @@ void Routine() {
   }
   
   // 点火制御
-  if (ENG_ON && IGN_Status == 1 && !IGN_His) {
+  if (ENG_ON && IGN_Status == 1 && !IGN_His && !mapOutOfRange) {
     // 点火タイミングに達したらON
     if (Ne_deg >= (360 - calculatedIGN_CA - Dwell_Time_CA)) {
       timeNow_IGN_ON = micros();
@@ -477,27 +466,32 @@ void statusTask(void *pvParameters) {
       }
     }
 
-    if (SerialUSBEnabled) {
-      Serial.print(tachoRpm);
-      Serial.print("\t");
-      Serial.print(INJ_timems, 1);
-      Serial.print("\t");
-      Serial.print(calculatedIGN_CA);
-      Serial.print("\t");
-      Serial.print(speed / 10.0f, 1); // 0.1km/h表示
-      Serial.print("\t");
-      Serial.print(distance);
-      Serial.print("\t");
-      Serial.print(gasml, 1);
-      Serial.print("\t");
-      Serial.print(dispergas, 1);
-      Serial.print("\t");
-      Serial.print(worktime);
-      Serial.print("\t");
-      Serial.print(Ne_deg);
-      Serial.println();
+    // MAP転送セッション中はUSBテレメトリを止め、コンソール応答だけを流す。
+    // Serial1(メーター・ロガー)側は常に出力し続ける。
+    if (SerialUSBEnabled && !mapConsoleTelemetryMuted()) {
+      if (mapConsoleUsbLock(pdMS_TO_TICKS(50))) {
+        Serial.print(tachoRpm);
+        Serial.print("\t");
+        Serial.print(INJ_timems, 1);
+        Serial.print("\t");
+        Serial.print(calculatedIGN_CA);
+        Serial.print("\t");
+        Serial.print(speed / 10.0f, 1); // 0.1km/h表示
+        Serial.print("\t");
+        Serial.print(distance);
+        Serial.print("\t");
+        Serial.print(gasml, 1);
+        Serial.print("\t");
+        Serial.print(dispergas, 1);
+        Serial.print("\t");
+        Serial.print(worktime);
+        Serial.print("\t");
+        Serial.print(Ne_deg);
+        Serial.println();
+        mapConsoleUsbUnlock();
+      }
     }
-    
+
     if (Serial1Enabled) {
       Serial1.print(tachoRpm);
       Serial1.print(",");
@@ -538,7 +532,16 @@ void statusTask(void *pvParameters) {
 void setup() {
   Serial.begin(115200);
   Serial1.begin(115200);
-  
+
+  // MAPをEEPROMから復元（無効なら内蔵defaultMapへフォールバック）
+  mapStoreInit();
+  mapConsoleInit();
+  Serial.print(F("MAP SOURCE: "));
+  Serial.print(mapGetSource() == MAP_SRC_EEPROM ? F("EEPROM") : F("DEFAULT"));
+  Serial.print(F(" ("));
+  Serial.print(mapGetActive().count);
+  Serial.println(F(" rows)"));
+
   pinMode(WH_IN, INPUT_PULLUP);
   pinMode(G_IN, INPUT_PULLUP);
   pinMode(STR_IN, INPUT_PULLUP);
@@ -594,7 +597,9 @@ void setup() {
   AGTimer.start();
   
   xTaskCreate(statusTask, "StatusTask", 128, NULL, 2, NULL);
-  
+  // MAP書き換えコンソール（statusTaskより低優先度）
+  xTaskCreate(mapConsoleTask, "MapConsole", 256, NULL, 1, NULL);
+
   vTaskStartScheduler();
 }
 

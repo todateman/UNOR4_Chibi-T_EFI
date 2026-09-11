@@ -11,7 +11,7 @@
 | 機器 | 詳細 |
 | ---- | ---- |
 | ECU | Arduino UNO R4 Minima (RA4M1) |
-| プログラム<BR>(コミットハッシュ) |  `#c7301b6b43c53b5172ccfd44263025526725fd54` |
+| プログラム<BR>(コミットハッシュ) | `#c7301b6b43c53b5172ccfd44263025526725fd54` |
 | エンジン信号発生器 | [Ardu-Stim](https://github.com/todateman/Ardu-Stim.git) `develop/furoshiki` ブランチ `furoshiki_2025` パターン |
 | オシロスコープ | RIGOL DHO804 (`USB0::6833::1101::DHO8A253701207::0::INSTR`) |
 | oscilloscope制御 | [visa-mcp](https://github.com/todateman/visa-mcp) + PyVISA |

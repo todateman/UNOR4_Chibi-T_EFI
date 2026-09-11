@@ -245,6 +245,10 @@ CSV パース・検証ルール・バンク切替・`send_map.py` のプロト�
 以下は**実機でしか確認できない項目**なので、車両に載せる前に順に潰すこと。  
 `1` → `7` の順（無負荷 → クランキング → 実走）で進めると手戻りが少ない。
 
+検証結果（Ardu-Stim + オシロによる代替検証、発見した不具合と修正内容を含む）:
+
+- [document/eeprom_map_console_verification_20260912.md](document/eeprom_map_console_verification_20260912.md)
+
 #### 1. 起動時フォールバック（エンジン停止・USB のみ）
 
 ```sh
@@ -252,12 +256,12 @@ pio run -t upload
 pio device monitor -b 115200
 ```
 
-- [ ] 起動直後に `MAP SOURCE: DEFAULT (15 rows)` が出る  
+- [x] 起動直後に `MAP SOURCE: DEFAULT (15 rows)` が出る  
   ※ EEPROM 未初期化のボードのみ。既に `MAP SAVE` 済みなら `MAP SOURCE: EEPROM (n rows)` が正しい
-- [ ] 起動メッセージを取り逃した場合は `MAP INFO` で `src=` / `eeprom=` を確認できる  
+- [x] 起動メッセージを取り逃した場合は `MAP INFO` で `src=` / `eeprom=` を確認できる  
   （USB CDC が未接続の間の出力は捨てられるため、電源投入がモニタ起動より先だと起動行は流れない）
-- [ ] `MAP?` の出力が `src/map_store.cpp` の `defaultMap[]` と一致する
-- [ ] `HELP` でコマンド一覧が出る
+- [x] `MAP?` の出力が `src/map_store.cpp` の `defaultMap[]` と一致する
+- [x] `HELP` でコマンド一覧が出る
 
 #### 2. CSV 転送 → RAM 反映
 
@@ -265,11 +269,11 @@ pio device monitor -b 115200
 python tools/send_map.py microSD/RPM.CSV
 ```
 
-- [ ] `RAMへ反映しました（読み戻し検証OK）` が出て終了コード 0
-- [ ] `MAP?` が `RPM.CSV` の内容（INJ=110 系）になっている
-- [ ] 転送中に USB テレメトリ（タブ区切り行）が止まり、転送後に再開する
-- [ ] 転送中も `Serial1`（メーター・ロガー）側の CSV 出力は途切れない ← **要実測**
-- [ ] 24 行の CSV でも RX FIFO 溢れなく通る（1 行ごとの ACK 同期が効いているか）
+- [x] `RAMへ反映しました（読み戻し検証OK）` が出て終了コード 0
+- [x] `MAP?` が `RPM.CSV` の内容（INJ=110 系）になっている
+- [x] 転送中に USB テレメトリ（タブ区切り行）が止まり、転送後に再開する
+- [x] 転送中も `Serial1`（メーター・ロガー）側の CSV 出力は途切れない
+- [x] 24 行の CSV でも RX FIFO 溢れなく通る（1 行ごとの ACK 同期が効いているか）
 
 #### 3. EEPROM 永続化（電源断をまたぐ）
 
@@ -277,20 +281,20 @@ python tools/send_map.py microSD/RPM.CSV
 python tools/send_map.py microSD/RPM_2026SUZUKA.CSV --save
 ```
 
-- [ ] `EEPROMへ保存しました` が出る
-- [ ] **USB を抜き差しして再起動** → `MAP SOURCE: EEPROM (15 rows)`
-- [ ] `MAP?` が 2026SUZUKA の内容
-- [ ] `MAP DEFAULT` → `MAP?` が既定値 → `MAP LOAD` → `MAP?` が EEPROM の内容に戻る
+- [x] `EEPROMへ保存しました` が出る
+- [x] **USB を抜き差しして再起動** → `MAP SOURCE: EEPROM (15 rows)`
+- [x] `MAP?` が 2026SUZUKA の内容
+- [x] `MAP DEFAULT` → `MAP?` が既定値 → `MAP LOAD` → `MAP?` が EEPROM の内容に戻る
 
 #### 4. 安全ガード（クランキング／エンジン始動）
 
 Ardu-Stim で回転信号を与えるか、実際にクランキングした状態で:
 
-- [ ] `MAP SAVE` → `ERR ENGINE_RUNNING` が返る
-- [ ] 拒否後に電源を落として再起動しても、EEPROM の内容が変わっていない
-- [ ] `MAP SET 3200 45 26` → `OK SET` が返り、`MAP?` に即反映される
-- [ ] `MAP BEGIN` 〜 `MAP END` の一括転送が稼働中でも通り、反映される
-- [ ] `MAP SET` / `MAP END` の実行前後で**エンジンが失火・ストールしない** ← 最重要
+- [x] `MAP SAVE` → `ERR ENGINE_RUNNING` が返る
+- [x] 拒否後に電源を落として再起動しても、EEPROM の内容が変わっていない
+- [x] `MAP SET 3200 45 26` → `OK SET` が返り、`MAP?` に即反映される
+- [x] `MAP BEGIN` 〜 `MAP END` の一括転送が稼働中でも通り、反映される
+- [x] `MAP SET` / `MAP END` の実行前後で**エンジンが失火・ストールしない** ← 最重要
 
 #### 5. 不正入力で既存 MAP が壊れないこと
 
@@ -299,26 +303,27 @@ printf 'RPM,INJ,IGN\n3000,40,20\n1000,40,20\n' > /tmp/bad_order.csv
 python tools/send_map.py /tmp/bad_order.csv     # ERR RPM_NOT_ASCENDING で非ゼロ終了
 ```
 
-- [ ] RPM 非昇順 / 25 行以上 / `ign_ca` 91 以上 のいずれでも `MAP END` が `ERR` を返す
-- [ ] そのいずれの後でも `MAP?` の内容が**転送前から変化していない**
-- [ ] 転送の途中で USB ケーブルを抜いても、次回起動時の MAP が壊れていない
+- [x] RPM 非昇順 / 25 行以上 / `ign_ca` 91 以上 のいずれでも `MAP END` が `ERR` を返す
+- [x] そのいずれの後でも `MAP?` の内容が**転送前から変化していない**
+- [x] 転送の途中で USB ケーブルを抜いても、次回起動時の MAP が壊れていない
 
 #### 6. リアルタイム性の非退行（オシロ）
 
 「デバッグ」節の Ardu-Stim + DHO804 の構成で、変更前のファームと比較する:
 
-- [ ] 転送・保存を行わない通常運転で、`INJ_OUT`(A0) / `IGN_OUT`(A1) のタイミングが変更前と一致
-- [ ] USB シリアルの 10Hz ロギングが従来どおり途切れない
-- [ ] `MAP SET` 実行の瞬間に噴射パルスが1サイクル内で分断・二重化しない  
+- [x] 転送・保存を行わない通常運転で、`INJ_OUT`(A0) / `IGN_OUT`(A1) のタイミングが変更前と一致
+- [x] USB シリアルのロギングが従来どおり途切れない
+- [x] `MAP SET` 実行の瞬間に噴射パルスが1サイクル内で分断・二重化しない  
   （バンク切替が原子的に効いているかの実測確認）
-- [ ] `MAP SAVE`（停止時）中に `Ne_deg` のカウント抜けが無い
+- [ ] `MAP SAVE`（停止時）中に `Ne_deg` のカウント抜けが無い（未検証、理由は検証結果ドキュメント参照）
 
 #### 7. 実走前の最終確認
 
-- [ ] 使用する MAP を `--save` で EEPROM に焼き、再起動して `MAP INFO` の `crc=` を記録
-- [ ] `python tools/send_map.py --dump` の出力が意図した CSV と一致
-- [ ] レブリミット（`TACHO_RPM_MAX` = 6000）付近で MAP 最終行を超えたとき、
+- [x] 使用する MAP を `--save` で EEPROM に焼き、再起動して `MAP INFO` の `crc=` を記録
+- [x] `python tools/send_map.py --dump` の出力が意図した CSV と一致
+- [x] レブリミット（`TACHO_RPM_MAX` = 6000）付近で MAP 最終行を超えたとき、
       `calculatedINJ_time` / `calculatedIGN_CA` が 0 になり燃料噴射・点火が止まる
+- [ ] 実走行（車速センサ `WH_IN`・実負荷・実燃料噴射量）は Ardu-Stim では代替不可のため未検証。実車で確認すること。
 
 > EEPROM を完全な未書き込み状態へ戻すコマンドは用意していない。  
 > 既定値へ戻したい場合は `MAP DEFAULT` → `MAP SAVE`（出所は `EEPROM` のままになる）。

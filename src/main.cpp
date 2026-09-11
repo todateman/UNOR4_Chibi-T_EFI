@@ -79,6 +79,10 @@ volatile unsigned long speed        = 0;  // WH_INの速度（0.1 km/h 単位）
 bool ENG_ON                          = false; // エンジンONフラグ（キルスイッチに連動）
 volatile uint8_t  calculatedINJ_time = 0; // 燃料噴射時間（x0.1ms）
 volatile int16_t  calculatedIGN_CA   = 0; // 点火進角角度（CA）
+// MAP最終行を超える回転数（レブリミット相当）で true。
+// calculatedIGN_CA==0 は「0の値が入ったMAP行」と区別できないため、
+// 点火・噴射の新規トリガ可否はこのフラグで判定する（進行中のON_HOLDは止めない）。
+volatile bool     mapOutOfRange      = false;
 volatile int16_t  Dwell_Time_CA      = 0; // ドゥエル時間（IGコイルへの充電時間）をクランク角度（CA）へ変換
 volatile int16_t  INJ_STR_CA         = 0; // 燃料噴射開始タイミング角度（CA）※INJ_END_CAと噴射時間から逆算
 volatile uint8_t  INJ_Status         = 1; // 燃料噴射状態（0:OFF, 1:ON, 2:ON_HOLD）
@@ -235,6 +239,7 @@ void updateEngineMap() {
   if (startState == LOW) {
     calculatedINJ_time = start_INJ_time;
     calculatedIGN_CA   = start_IGN_CA;
+    mapOutOfRange = false;
   }
   // スタータOFFの場合
   else {
@@ -245,12 +250,14 @@ void updateEngineMap() {
       if (tachoRpm < map.e[i].rpm) {
         calculatedINJ_time = map.e[i].inj_time;
         calculatedIGN_CA   = map.e[i].ign_ca;
+        mapOutOfRange = false;
         return;
       }
     }
     // MAP上限を超える回転数では燃料噴射・点火を止める
     calculatedINJ_time = 0;
     calculatedIGN_CA   = 0;
+    mapOutOfRange = true;
     return;
   }
 }
@@ -358,8 +365,8 @@ void Routine() {
     inj360Reset = true;
   }
 
-  // 燃料噴射制御 
-  if (ENG_ON && INJ_Status == 1 && !INJ_His) {
+  // 燃料噴射制御
+  if (ENG_ON && INJ_Status == 1 && !INJ_His && !mapOutOfRange) {
     // 燃料噴射タイミングに達したらON
     if (Ne_deg >= INJ_STR_CA) {
       timeNow_INJ_ON = micros();
@@ -385,7 +392,7 @@ void Routine() {
   }
   
   // 点火制御
-  if (ENG_ON && IGN_Status == 1 && !IGN_His) {
+  if (ENG_ON && IGN_Status == 1 && !IGN_His && !mapOutOfRange) {
     // 点火タイミングに達したらON
     if (Ne_deg >= (360 - calculatedIGN_CA - Dwell_Time_CA)) {
       timeNow_IGN_ON = micros();

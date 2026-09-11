@@ -1,9 +1,9 @@
 {
   "servers": {
     "visa-mcp": {
-      "command": "~/.claude/mcp/visa-mcp/.venv/bin/python",
+      "command": "~/Documents/VSCode/visa-mcp/.venv/bin/python",
       "args": ["src/server.py"],
-      "cwd": "~/.claude/mcp/visa-mcp",
+      "cwd": "~/Documents/VSCode/visa-mcp",
       "env": {
         "PYVISA_LOG_LEVEL": "INFO"
       }

@@ -24,7 +24,8 @@ void IRAM_ATTR G_PULSE_ISR();
 //-----------------------------------------------------------------------------
 
 #define ROUTINE_CYCLE_US     24
-#define STATUS_TASK_DELAY_MS 500
+#define STATUS_TASK_DELAY_MS  100   // タスク基本周期: 100ms (10Hz)
+#define SERIAL_USB_DIVISOR      5   // USB Serial 分周比: 5回に1回 = 500ms (2Hz)
 
 #define PERIMETER_MM         1548UL   // [mm]
 #define TACHO_RPM_MAX        6000     // レブリミット（RPM）※これを超えると燃料噴射・点火停止
@@ -428,100 +429,107 @@ void Routine() {
   }
   else {                                      // キルスイッチがOFFの場合（停止状態）
     ENG_ON = false;
+    STR_IN_state = false;
+    fastestdigitalWrite(STR_OUT, HIGH);        // スタータOFF（安全のため強制的にOFFへ）
   }
 }
 
 //-----------------------------------------------------------------------------
-// statusTask(): 500ms間隔でシステム状態を出力
+// statusTask(): Serial1を10Hz、SerialUSBを2Hzで出力
 //-----------------------------------------------------------------------------
 void statusTask(void *pvParameters) {
   (void)pvParameters;
   TickType_t xLastWakeTime = xTaskGetTickCount();
-  
-  for (;;) {
-    if (Launch) {
-      fastestdigitalWrite(DISRESET_OUT, LOW);
-      worktime = (millis() - starttime) / 1000;
-    } else {
-      fastestdigitalWrite(DISRESET_OUT, HIGH);
-      worktime = 0;
-      starttime = 0;
-      distancemm = 0;
-      distance = 0;
-      gasml = 0.0;
-    }
-    INJ_timems = calculatedINJ_time * 0.1;
-    if (gasml > 0.0)
-      dispergas = (float)distance / gasml;
-    else
-      dispergas = 0.0;
-    
-    // 停止減衰: 最後のパルスから時間が経つほど再計算速度を小さくする (1回転未満で停止した場合の見かけ速度低下)
-    unsigned long age = micros() - speedBefore; // 最終パルスからの経過(us)
-    if (age > speedWidth && speedWidth > 0) {   // 新しいパルスが来ていない区間
-      unsigned long decay = (36000UL * PERIMETER_MM) / age; // 0.1km/h単位
-      if (decay < speed) {
-        if (decay > 999) decay = 999;
-        speed = decay < 1 ? 0 : decay; // 0.0未満は 0.0 とする
-      }
-    }
+  uint8_t div_cnt = 0;
+  char s1buf[64];
 
-    // MAP転送セッション中はUSBテレメトリを止め、コンソール応答だけを流す。
-    // Serial1(メーター・ロガー)側は常に出力し続ける。
-    if (SerialUSBEnabled && !mapConsoleTelemetryMuted()) {
-      if (mapConsoleUsbLock(pdMS_TO_TICKS(50))) {
-        Serial.print(tachoRpm);
-        Serial.print("\t");
-        Serial.print(INJ_timems, 1);
-        Serial.print("\t");
-        Serial.print(calculatedIGN_CA);
-        Serial.print("\t");
-        Serial.print(speed / 10.0f, 1); // 0.1km/h表示
-        Serial.print("\t");
-        Serial.print(distance);
-        Serial.print("\t");
-        Serial.print(gasml, 1);
-        Serial.print("\t");
-        Serial.print(dispergas, 1);
-        Serial.print("\t");
-        Serial.print(worktime);
-        Serial.print("\t");
-        Serial.print(Ne_deg);
-        Serial.println();
-        mapConsoleUsbUnlock();
-      }
-    }
+  for (;;) {
+    // ── 高速パス（10Hz）──────────────────────────────────────────────────
+    INJ_timems = calculatedINJ_time * 0.1f;
 
     if (Serial1Enabled) {
-      Serial1.print(tachoRpm);
-      Serial1.print(",");
-      Serial1.print(INJ_timems, 1);
-      Serial1.print(",");
-      Serial1.print(calculatedIGN_CA);
-      Serial1.print(",");
-      Serial1.print(speed / 10.0f, 1); // 0.1km/h表示
-      Serial1.print(",");
-      Serial1.print(distance);
-      Serial1.print(",");
-      Serial1.print(gasml, 1);
-      Serial1.print(",");
-      Serial1.print(dispergas, 1);
-      Serial1.print(",");
-      Serial1.print(worktime);
-      Serial1.println();
+      // newlib-nano の snprintf は %.1f 非対応のため整数演算で小数1桁を表現
+      unsigned inj10 = (unsigned)(INJ_timems * 10.0f + 0.5f);
+      unsigned gas10 = (unsigned)(gasml * 10.0f + 0.5f);
+      unsigned dis10 = (unsigned)(dispergas * 10.0f + 0.5f);
+      int len = snprintf(s1buf, sizeof(s1buf),
+        "%u,%u.%u,%d,%lu.%lu,%u,%u.%u,%u.%u,%u\n",
+        (unsigned)tachoRpm,           // RPM
+        inj10 / 10, inj10 % 10,       // INJ_timems
+        (int)calculatedIGN_CA,        // calculatedIGN_CA
+        speed / 10, speed % 10,       // speed
+        (unsigned)distance,           // distance
+        gas10 / 10, gas10 % 10,       // gasml
+        dis10 / 10, dis10 % 10,       // dispergas
+        (unsigned)worktime);          // worktime
+      if (len > 0) Serial1.write((uint8_t*)s1buf, (size_t)len);
     }
-    
-    if (micros() - tachoBefore >= 1200000UL) {
-      tachoRpm = 0;
-      usecperdig = 1.0;
-      calculatedINJ_time = 0;
-      calculatedIGN_CA = 0;
+
+    // ── 低速パス（2Hz: 5回に1回）─────────────────────────────────────────
+    if (++div_cnt >= SERIAL_USB_DIVISOR) {
+      div_cnt = 0;
+
+      if (Launch) {
+        fastestdigitalWrite(DISRESET_OUT, LOW);
+        worktime = (millis() - starttime) / 1000;
+      } else {
+        fastestdigitalWrite(DISRESET_OUT, HIGH);
+        worktime = 0;
+        starttime = 0;
+        distancemm = 0;
+        distance = 0;
+        gasml = 0.0;
+      }
+      dispergas = (gasml > 0.0f) ? (float)distance / gasml : 0.0f;
+
+      // 停止減衰: 最後のパルスから時間が経つほど再計算速度を小さくする
+      unsigned long age = micros() - speedBefore;
+      if (age > speedWidth && speedWidth > 0) {
+        unsigned long decay = (36000UL * PERIMETER_MM) / age;
+        if (decay < speed) {
+          if (decay > 999) decay = 999;
+          speed = decay < 1 ? 0 : decay;
+        }
+      }
+
+      // タイムアウトゼロ化
+      if (micros() - tachoBefore >= 1200000UL) {
+        tachoRpm = 0;
+        usecperdig = 1.0;
+        calculatedINJ_time = 0;
+        calculatedIGN_CA = 0;
+      }
+      if (micros() - speedBefore > 8000000UL) {
+        speed = 0;
+      }
+
+      // MAP転送セッション中はUSBテレメトリを止め、コンソール応答だけを流す。
+      // Serial1(メーター・ロガー)側は常に出力し続ける。
+      if (SerialUSBEnabled && !mapConsoleTelemetryMuted()) {
+        if (mapConsoleUsbLock(pdMS_TO_TICKS(50))) {
+          Serial.print(tachoRpm);
+          Serial.print("\t");
+          Serial.print(INJ_timems, 1);
+          Serial.print("\t");
+          Serial.print(calculatedIGN_CA);
+          Serial.print("\t");
+          Serial.print(speed / 10.0f, 1);
+          Serial.print("\t");
+          Serial.print(distance);
+          Serial.print("\t");
+          Serial.print(gasml, 1);
+          Serial.print("\t");
+          Serial.print(dispergas, 1);
+          Serial.print("\t");
+          Serial.print(worktime);
+          Serial.print("\t");
+          Serial.print(Ne_deg);
+          Serial.println();
+          mapConsoleUsbUnlock();
+        }
+      }
     }
-    // 無信号ゼロ化: 減衰後さらに 8 秒相当以上経過で強制 0 (約 8s = 8,000,000us)
-    if (micros() - speedBefore > 8000000UL) {
-      speed = 0;
-    }
-    
+
     vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(STATUS_TASK_DELAY_MS));
   }
 }
@@ -596,7 +604,7 @@ void setup() {
   AGTimer.init(ROUTINE_CYCLE_US, Routine);
   AGTimer.start();
   
-  xTaskCreate(statusTask, "StatusTask", 128, NULL, 2, NULL);
+  xTaskCreate(statusTask, "StatusTask", 256, NULL, 2, NULL);
   // MAP書き換えコンソール（statusTaskより低優先度）
   xTaskCreate(mapConsoleTask, "MapConsole", 256, NULL, 1, NULL);
 

@@ -12,7 +12,7 @@ Arduino UNO R4（RA4M1）/ 互換環境上で動作するエコラン車両用EC
   - カム角: [`G_PULSE_ISR`](src/main.cpp)
 - 高速 GPIO: [`fastestdigitalWrite` / `fastestdigitalRead`](src/fastestdigitalRW.hpp)
 - フリータスク: FreeRTOS
-  - 500ms 周期 [`statusTask`](src/main.cpp) : テレメトリ出力
+  - [`statusTask`](src/main.cpp) : Serial1 出力 100ms 周期 (10Hz) / SerialUSB 出力 500ms 周期 (2Hz)
   - 5ms 周期 [`mapConsoleTask`](src/map_console.cpp) : MAP 書き換えコンソール
 
 ## ディレクトリ構成（抜粋）
@@ -55,10 +55,10 @@ pio device monitor -b 115200
 | PERIMETER_MM | 1548 | タイヤ周長(mm) |
 | TACHO_RPM_MAX | 6000 | レブリミット <BR> （回転数上限保護） |
 | Dwell_Time_US | 5000 | ドゥエル時間（us） <BR> IGコイルへの充電時間 |
-| start_INJ_time | 50 | 始動時の燃料噴射時間（x0.1ms） |
-| start_IGN_CA | 10 | 始動時の点火進角（CA） |
+| start_INJ_time | 80 | 始動時の燃料噴射時間（x0.1ms） |
+| start_IGN_CA | 0 | 始動時の点火進角（CA） |
 | start_INJ_END_CA | 20 | 始動時の燃料噴射終了タイミング角度（CA） |
-| INJ_END_CA | 700 | 通常時の燃料噴射終了タイミング角度（CA） |
+| INJ_END_CA | 680 | 通常時の燃料噴射終了タイミング角度（CA） |
 
 ## ピン割り当て
 
@@ -94,17 +94,9 @@ LOW アクティブ出力注意 (INJ/IGN/STR/DISRESET)。
    - `G_PULSE_ISR`: カムパルス同期フラグ設定  
 
    - 角度モデルと usecperdig
-     - `usecperdig` は NE_A パルス間隔 (µs/deg) をクランク割り込み [`ReadNe_ISR`](src/main.cpp) 内で直接測定し更新。  
-     - MA735 使用時は `usecperdig` を補間に使わない（`Ne_deg` を直接取得）。  
-     - 推定補間時: `Ne_deg += ROUTINE_CYCLE_US / usecperdig` (エンコーダ無効かつ MA735無効時)。
-
-     - 簡易平滑: 移動平均 (3:1)
-
-       ```text
-       usecperdig = (prev*3 + dt) / 4
-       ```
-
-     - 異常除外: `dt == 0` や 過大 (例 > 100000µs) は無視。
+     - `usecperdig` は非エンコーダ・非MA735モード時にのみ補間に使用。  
+       `Ne_deg += ROUTINE_CYCLE_US / usecperdig` (エンコーダ無効かつ MA735無効時)。
+     - 通常は `EncoderEnabled = true` のため使用されない（初期値 `1.0`、無信号タイムアウト時にリセット）。
 
 2. 周期関数 [`Routine`](src/main.cpp):
    - スタート/キル状態評価
@@ -115,9 +107,9 @@ LOW アクティブ出力注意 (INJ/IGN/STR/DISRESET)。
    - 噴射時間経過で OFF & 燃料量積算
    - 点火進角計算 & 保持時間後 OFF
 
-3. 500ms タスク [`statusTask`](src/main.cpp):
-   - 状態計算 (燃費, 稼働時間)
-   - シリアル出力 (タブ/CSV)
+3. タスク [`statusTask`](src/main.cpp):
+   - 高速パス (10Hz/100ms): Serial1 CSV出力 (`snprintf` + 一括 `write`)
+   - 低速パス (2Hz/500ms): 状態計算 (燃費, 稼働時間, 速度減衰), SerialUSB 出力
 
 ## 燃料噴射計算
 
@@ -346,16 +338,20 @@ AGTimer: [`AGTimer.init(period_us, callback)`](lib/AGTimer_R4_Library/src/AGTime
 
 ## FreeRTOS
 
-- 監視タスク: `statusTask` (500ms, 優先度 2, スタック 128 words)  
+- 監視タスク: `statusTask` (Serial1: 100ms(10Hz) / SerialUSB: 500ms(2Hz), 優先度 2, スタック 256 words)  
 - MAP コンソール: `mapConsoleTask` (5ms, 優先度 1, スタック 256 words)  
 - USB(`Serial`) 出力は両タスクで共有するため、`mapConsoleUsbLock()` / `mapConsoleUsbUnlock()` で排他する。  
   MAP 転送セッション中は `statusTask` の USB テレメトリを停止する（`Serial1` 側は常時出力）。
-- 追加タスクは `xTaskCreate` で拡張可能。スタック 128 words は余裕少 → 拡張時は増量推奨。
+- `statusTask` のスタック 256 words は `snprintf` 浮動小数点フォーマット分を含む。追加タスクは `xTaskCreate` で拡張可能。スタック追加時は増量推奨。
 
 ## ログ / 出力
 
-USB シリアル (タブ区切り) / `Serial1` (CSV)。  
-出力フィールド: RPM, INJ(ms), IGN_CA, speed(km/h, 0.1分解能・停止時は最終パルス経過で減衰→約8sで0.0), distance(km), fuel(ml), km/L, worktime(s), Ne_deg。
+| ポート | 形式 | 周期 | フィールド |
+| --- | --- | --- | --- |
+| `Serial1` (HW UART) | CSV | **10Hz (100ms)** | RPM, INJ(ms), IGN_CA, speed, distance, fuel(ml), km/L, worktime |
+| `Serial` (USB CDC) | タブ区切り | 2Hz (500ms) | 上記 + Ne_deg |
+
+speed は 0.1km/h 分解能。停止時は最終パルス経過時間で減衰し、約8秒後に 0.0 へ。
 
 ## PlantUML 図の参照
 
@@ -400,7 +396,7 @@ java -jar "$env:USERPROFILE\.vscode\extensions\jebbs.plantuml-2.18.1\plantuml.ja
 
 [Ardu-Stim](https://github.com/todateman/Ardu-Stim.git)の`develop/furoshiki`ブランチにある`furoshiki_2025`のパターンと、[visa-mcp](https://github.com/todateman/visa-mcp)によるオシロスコープの制御を組み合わせて、ECUプログラムのデバッグを行う。
 
-- VISAリソース(REGOL DHO804): `USB0::6833::1101::DHO8A253701207::0::INSTR`
+- VISAリソース(RIGOL DHO804): `USB0::6833::1101::DHO8A253701207::0::INSTR`
 - CH1: D9
 - CH2: D2
 - CH3: A0

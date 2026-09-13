@@ -551,6 +551,9 @@ void statusTask(void *pvParameters) {
         usecperdig = 1.0;
         calculatedINJ_time = 0;
         calculatedIGN_CA = 0;
+        // 噴射・点火を止めた以上、MAPは参照されていない。
+        // ここで255にしないと、GUIが最後に採用した行をハイライトし続ける。
+        activeMapRow = 255;
       }
       if (micros() - speedBefore > 8000000UL) {
         speed = 0;

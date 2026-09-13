@@ -289,8 +289,10 @@ async function saveEeprom() {
   if (!window.confirm('現在のMAPをEEPROMへ保存します。エンジンが停止していることを確認してください。')) return;
   state.busy = true;
   render();
-  // ベンチではノイズで tachoRpm が一瞬非ゼロになり ERR ENGINE_RUNNING が返ることがある
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
+  // ベンチではノイズで tachoRpm が一瞬非ゼロになり ERR ENGINE_RUNNING が返る。
+  // 実測では 36% の確率で拾うので、3回だと 5% ほど取りこぼす。
+  const SAVE_RETRIES = 5;
+  for (let attempt = 1; attempt <= SAVE_RETRIES; attempt += 1) {
     try {
       // eslint-disable-next-line no-await-in-loop
       const r = await state.transport.command('MAP SAVE');
@@ -299,13 +301,13 @@ async function saveEeprom() {
         : 'EEPROMへ保存しました', 'ok');
       break;
     } catch (e) {
-      if (!String(e.message).includes('ENGINE_RUNNING') || attempt === 3) {
+      if (!String(e.message).includes('ENGINE_RUNNING') || attempt === SAVE_RETRIES) {
         say(`EEPROM保存に失敗しました: ${e.message}`, 'error');
         break;
       }
-      say(`ENGINE_RUNNING が返りました。再試行します (${attempt}/3)`, 'warn');
+      say(`ENGINE_RUNNING が返りました。再試行します (${attempt}/${SAVE_RETRIES})`, 'warn');
       // eslint-disable-next-line no-await-in-loop
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 400));
     }
   }
   state.busy = false;
@@ -442,8 +444,12 @@ function render() {
   const s = safety();
   const t = state.live;
   const dwellNorm = state.dwell.normalized();
-  const activeRow = t && t.row < M.MAP_MAX_ENTRIES ? t.row
-    : (t ? M.rowForRpm(state.rows, t.rpm) : -1);
+  // 採用行はファームの報告を真とする。row=255 は「MAPを参照していない」の意味なので
+  // ハイライトを消す（回転数から推測し直すと、噴射・点火が止まっている状態でも
+  // どこかの行を指してしまう）。回転数からの推測は、row を持たない旧ファーム専用。
+  const activeRow = !t ? -1
+    : t.legacy ? M.rowForRpm(state.rows, t.rpm)
+      : t.row < M.MAP_MAX_ENTRIES ? t.row : -1;
 
   // ヘッダ
   $('#conn-state').textContent = state.connected ? `接続中: ${state.portName}` : '未接続';

@@ -222,6 +222,19 @@ test('テレメトリのパース（新書式）', () => {
   assert.equal(s.flags & 0x08, 0x08);   // mapOutOfRange
 });
 
+test('row=255 は「MAPを参照していない」を意味する', () => {
+  // 実機で見つけた不具合の固定。回転信号が1.2秒無いとファームは噴射・点火を止める。
+  // そのとき row=255 が来るので、回転数から行を推測し直してはいけない
+  // （rpm=0 から推測すると先頭行を指してしまい、止まっているのにハイライトが残る）。
+  const s = parseTelemetry('T\t1\t100\t0\t0\t0\t0\t213\t255\t0');
+  assert.equal(s.row, 255);
+  assert.equal(s.legacy, false);
+  // 旧書式は row を持たないので、そのときだけ推測にフォールバックしてよい
+  const legacy = parseTelemetry('0\t0.0\t0\t0.0\t0\t0.0\t0.0\t0\t213');
+  assert.equal(legacy.legacy, true);
+  assert.equal(legacy.row, 255);
+});
+
 test('テレメトリのパース（旧2Hz書式）', () => {
   const s = parseTelemetry('1560\t4.0\t15\t18.4\t0\t0.0\t0.0\t12\t213');
   assert.equal(s.rpm, 1560);

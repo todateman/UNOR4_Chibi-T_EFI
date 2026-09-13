@@ -33,9 +33,11 @@ ACK_TIMEOUT = 3.0
 SLOW_TIMEOUT = 10.0
 SLOW_COMMANDS = ("MAP SAVE", "MAP LOAD", "MAP DEFAULT")
 
-# ENG_ON / tachoRpm のノイズで MAP SAVE が弾かれたときのリトライ
-SAVE_RETRIES = 3
-SAVE_RETRY_WAIT = 0.5
+# ENG_ON / tachoRpm のノイズで MAP SAVE が弾かれたときのリトライ。
+# 実測（UNO R4 Minima 単体、Ardu-Stim 未接続）では tachoRpm が 36% の確率で
+# 15rpm を拾い、3回では 5% 程度取りこぼす。5回なら 99% 以上通る。
+SAVE_RETRIES = 5
+SAVE_RETRY_WAIT = 0.4
 
 # Arduino UNO R4 Minima (Renesas RA4M1) の VID
 ARDUINO_VIDS = (0x2341, 0x2A03)

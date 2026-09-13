@@ -300,7 +300,14 @@ def main() -> int:
             print(f"接続できませんでした（GUIから選び直せます）: {e}", file=sys.stderr)
 
     url = f"http://localhost:{args.http_port}/"
-    httpd = ThreadingHTTPServer(("127.0.0.1", args.http_port), Handler)
+    try:
+        httpd = ThreadingHTTPServer(("127.0.0.1", args.http_port), Handler)
+    except OSError as e:
+        bridge.disconnect()       # 開いたシリアルを閉じてから抜ける
+        print(f"ポート {args.http_port} を使用できません: {e}\n"
+              f"別の map_gui.py が動いていないか確認するか、"
+              f"--http-port で別のポートを指定してください。", file=sys.stderr)
+        return 1
     httpd.daemon_threads = True
     print(f"MAP GUI: {url}  （Ctrl+C で終了）")
     if not args.no_browser:

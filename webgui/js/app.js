@@ -176,7 +176,16 @@ function onTelemetry(s) {
 // -----------------------------------------------------------------------------
 // 実機とのやりとり
 // -----------------------------------------------------------------------------
-async function readFromDevice() {
+/**
+ * 実機のMAPと状態を読み直す。
+ *
+ * syncEdit=true なら編集中のテーブルも実機の内容で置き換える。
+ * 「実機読出」「EEPROM読直し」「既定へ戻す」は実機の値を画面に反映させるための
+ * 操作なので、編集済みでも必ず追従させること（さもないと実機だけ変わって
+ * 画面が変わらず、操作が効いていないように見える）。
+ * 上書きの前に履歴へ積むので、編集内容は Undo で取り戻せる。
+ */
+async function readFromDevice({ syncEdit = false } = {}) {
   if (!state.connected) return;
   state.busy = true;
   render();
@@ -195,6 +204,15 @@ async function readFromDevice() {
     if (!state.rows.length) {
       state.rows = M.clone(state.deviceRows);
       state.history.clear();
+    } else if (syncEdit) {
+      const changed = M.diff(state.deviceRows, state.rows);
+      const dirty = !changed.breakpointsMatch || changed.changedRows.length > 0;
+      if (dirty) {
+        commitBefore();          // 編集内容を Undo で戻せるようにしてから上書きする
+        state.selection.clear();
+        say('編集中の内容を実機の値で置き換えました（元に戻すには ↶）', 'warn');
+      }
+      state.rows = M.clone(state.deviceRows);
     }
     say(`実機から読み出しました: ${state.deviceRows.length} 行 `
       + `src=${state.info.src} crc=${M.hex4(localCrc)}`, 'ok');
@@ -240,7 +258,8 @@ async function uploadFull() {
     say(`転送に失敗しました（実機のMAPは変更されていません）: ${e.message}`, 'error');
   } finally {
     state.busy = false;
-    await readFromDevice();
+    // 成功していれば実機＝編集中なので差分が消える。失敗時は実機の実際の値に戻す。
+    await readFromDevice({ syncEdit: true });
   }
 }
 
@@ -262,7 +281,7 @@ async function pushDelta() {
     say(`ライブ反映に失敗しました: ${e.message}`, 'error');
   } finally {
     state.busy = false;
-    await readFromDevice();
+    await readFromDevice({ syncEdit: true });
   }
 }
 
@@ -326,7 +345,8 @@ async function simpleCommand(line, label) {
     say(`${label} に失敗しました: ${e.message}`, 'error');
   } finally {
     state.busy = false;
-    await readFromDevice();
+    // MAP LOAD / MAP DEFAULT は実機のMAPを差し替える操作なので、画面も追従させる
+    await readFromDevice({ syncEdit: true });
   }
 }
 
@@ -566,7 +586,7 @@ function wire() {
   $('#btn-disconnect').addEventListener('click', () => guard(disconnect));
 
   // 実機
-  $('#btn-read').addEventListener('click', () => guard(readFromDevice));
+  $('#btn-read').addEventListener('click', () => guard(() => readFromDevice({ syncEdit: true })));
   $('#btn-upload').addEventListener('click', () => guard(uploadFull));
   $('#btn-push').addEventListener('click', () => guard(pushDelta));
   $('#btn-save').addEventListener('click', () => guard(saveEeprom));

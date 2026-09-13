@@ -1,4 +1,4 @@
-﻿﻿# UNOR4_Chtbi-T_EFI
+﻿﻿# UNOR4_Chibi-T_EFI
 
 Arduino UNO R4（RA4M1）/ 互換環境上で動作するエコラン車両用ECUプログラム
 
@@ -183,7 +183,7 @@ python3 tools/map_gui.py --port /dev/cu.usbmodem1101
 python3 tools/map_gui.py --fake              # 実機なしでGUIを試す（モックECU）
 ```
 
-GitHub Pages 版は `https://todateman.github.io/UNOR4_Chtbi-T_EFI/` で、
+GitHub Pages 版は `https://todateman.github.io/UNOR4_Chibi-T_EFI/` で、
 Chrome / Edge の「Web Serial で接続」から直接 USB に繋がる。  
 外部 CDN を一切使っておらず Service Worker を積んであるので、**一度開けばピットでオフラインでも動く**。  
 Pages 版にはローカルサーバが居ないため、「ローカルサーバ経由」「モック ECU」のボタンは

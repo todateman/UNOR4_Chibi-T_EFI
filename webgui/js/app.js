@@ -734,9 +734,18 @@ function wire() {
     $('#btn-webserial').disabled = true;
     $('#btn-webserial').title = 'このブラウザは Web Serial に未対応です（Chrome / Edge が必要）';
   }
-  if (!HttpBridgeTransport.available || location.protocol === 'file:') {
-    $('#btn-bridge').disabled = true;
-    $('#btn-fake').disabled = true;
+  // ブリッジ用のボタンは既定で無効にし、サーバの応答を確かめてから有効にする。
+  // GitHub Pages にはローカルサーバが居ないので、押せてしまうと404になるだけ。
+  setBridgeButtons(false);
+}
+
+function setBridgeButtons(enabled) {
+  const note = enabled ? ''
+    : 'ローカルサーバが見つかりません。python3 tools/map_gui.py を起動して、'
+      + 'そこで開いたページから使ってください。';
+  for (const id of ['#btn-bridge', '#btn-fake']) {
+    $(id).disabled = !enabled;
+    $(id).title = note;
   }
 }
 
@@ -782,18 +791,17 @@ async function guard(fn) {
  * サーバは起動時に自分で接続するので、これが無いとページを開くたびに
  * 接続し直すことになり、テレメトリが一瞬途切れる。
  */
-async function attachIfServerConnected() {
-  if (!HttpBridgeTransport.available) return false;
+async function attachIfServerConnected(status) {
+  if (!status || !status.connected) return false;
   try {
     const tp = new HttpBridgeTransport();
-    const st = await tp.status();
-    if (!st.connected) return false;
     attachTransport(tp);
-    tp.attach(st);
+    tp.attach(status);
     await afterConnect();
     return true;
-  } catch {
-    return false;   // サーバが居ない（GitHub Pages 版）
+  } catch (e) {
+    say(`ローカルサーバへの追従に失敗しました: ${e.message}`, 'warn');
+    return false;
   }
 }
 
@@ -804,14 +812,27 @@ async function boot() {
   render();
   say('MAP調整GUI を起動しました。上の「接続」から実機を選んでください。');
 
-  if (await attachIfServerConnected()) return;
-  if (!WebSerialTransport.supported && !HttpBridgeTransport.available) {
-    say('このブラウザでは実機に接続できません。Chrome / Edge を使うか、'
-      + 'python3 tools/map_gui.py でローカルサーバを起動してください。', 'warn');
-  }
+  // Service Worker は静的配信されているときだけ。ローカルサーバ経由では
+  // /api/ を挟むので登録しない（sw.js側でも /api/ は素通しにしている）。
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
     navigator.serviceWorker.register('./sw.js').catch(() => {});
   }
+
+  // ローカルサーバが居るかを一度だけ確かめ、その結果でボタンの有効／無効を決める
+  const status = await HttpBridgeTransport.probe();
+  setBridgeButtons(status !== null);
+
+  if (status === null) {
+    if (!WebSerialTransport.supported) {
+      say('このブラウザでは実機に接続できません。Chrome / Edge の Web Serial を使うか、'
+        + 'python3 tools/map_gui.py でローカルサーバを起動してください。', 'warn');
+    } else {
+      say('ローカルサーバは見つかりませんでした。「Web Serial で接続」から実機を選んでください。', 'dim');
+    }
+    return;
+  }
+  if (await attachIfServerConnected(status)) return;
+  say('ローカルサーバが動いています。「ローカルサーバ経由」から実機を選んでください。', 'dim');
 }
 
 document.addEventListener('DOMContentLoaded', boot);

@@ -19,11 +19,32 @@ export class HttpBridgeTransport {
     this._noticeCbs = new Set();
   }
 
-  /** このページがローカルサーバから配信されているか（= ブリッジが使えるか）。 */
+  /**
+   * ブリッジを試す価値があるか（file: では fetch も EventSource も使えない）。
+   * これは「使える」保証ではない。GitHub Pages のような静的配信でも true になるので、
+   * 実際に使えるかは probe() でサーバの応答を確かめること。
+   */
   static get available() {
     return typeof location !== 'undefined'
-      && (location.protocol === 'http:' || location.protocol === 'https:')
-      && location.protocol !== 'file:';
+      && (location.protocol === 'http:' || location.protocol === 'https:');
+  }
+
+  /**
+   * ローカルサーバ(tools/map_gui.py)が実際に居るかを確かめる。
+   * 居れば status を、居なければ null を返す。
+   * GitHub Pages では /api/status が404になるのでここで null になり、
+   * ブリッジ用のボタンを無効化できる。
+   */
+  static async probe(base = '') {
+    if (!HttpBridgeTransport.available) return null;
+    try {
+      const res = await fetch(`${base}/api/status`, { cache: 'no-store' });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return (data && typeof data.connected === 'boolean') ? data : null;
+    } catch {
+      return null;   // サーバが居ない（静的配信）
+    }
   }
 
   onTelemetry(cb) { this._telemetryCbs.add(cb); return () => this._telemetryCbs.delete(cb); }

@@ -186,6 +186,17 @@ python3 tools/map_gui.py --fake              # 実機なしでGUIを試す（モ
 GitHub Pages 版は `https://todateman.github.io/UNOR4_Chtbi-T_EFI/` で、
 Chrome / Edge の「Web Serial で接続」から直接 USB に繋がる。  
 外部 CDN を一切使っておらず Service Worker を積んであるので、**一度開けばピットでオフラインでも動く**。  
+Pages 版にはローカルサーバが居ないため、「ローカルサーバ経由」「モック ECU」のボタンは
+自動的に無効になる（起動時に `/api/status` の応答を確かめている）。
+
+公開するには初回だけ次の 2 つが必要。
+
+1. リポジトリの **Settings → Pages → Source** を `GitHub Actions` にする
+2. `webgui/` を含む変更を **`main` へマージ**する
+   （[.github/workflows/pages.yml](.github/workflows/pages.yml) は `main` への push でのみ動く。
+   手動実行したい場合は Actions タブの `Deploy Web GUI to Pages` → `Run workflow`）
+
+デプロイ前にテスト（`node --test` と `test_map_protocol.py`）が走り、失敗すると公開されない。
 
 できること:
 

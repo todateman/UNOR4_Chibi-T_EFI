@@ -12,6 +12,7 @@ on:
     branches: [main]
     paths:
       - 'webgui/**'
+      - 'tools/**'          # プロトコル層はGUIと共有しているのでテスト対象に含める
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -31,12 +32,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-      # 検証規則とCRCがファーム(src/map_store.cpp)と一致しているかを確認する
-      - run: node --test "webgui/test/*.test.mjs"
+          node-version: '22'
+      # 検証規則とCRCがファーム(src/map_store.cpp)と一致しているかを確認する。
+      # globはクォートせずシェルに展開させる。node自身のglob解釈は Node 22 以降
+      # でしか使えず、クォートすると古いNodeでリテラルのパスとして扱われて落ちる。
+      - run: node --test webgui/test/*.test.mjs
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      # pyserialは不要（テストはFakeSerialを使う）
       - run: python3 tools/test_map_protocol.py
 
   deploy:

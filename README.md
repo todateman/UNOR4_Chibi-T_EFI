@@ -192,8 +192,8 @@ Pages 版にはローカルサーバが居ないため、「ローカルサー�
 公開するには初回だけ次の 2 つが必要。
 
 1. リポジトリの **Settings → Pages → Source** を `GitHub Actions` にする
-2. `webgui/` を含む変更を **`main` へマージ**する
-   （[.github/workflows/pages.yml](.github/workflows/pages.yml) は `main` への push でのみ動く。
+2. `webgui/` を含む変更を **`main` へマージ**する  
+   （[.github/workflows/pages.yml](.github/workflows/pages.yml) は `main` への push でのみ動く。  
    手動実行したい場合は Actions タブの `Deploy Web GUI to Pages` → `Run workflow`）
 
 デプロイ前にテスト（`node --test` と `test_map_protocol.py`）が走り、失敗すると公開されない。
@@ -213,7 +213,7 @@ Pages 版にはローカルサーバが居ないため、「ローカルサー�
 安全のために GUI 側で次を強制している。
 
 - `MAP SAVE` は `eng=OFF` かつ `rpm=0` のときだけ押せる。  
-  ベンチではノイズで `ERR ENGINE_RUNNING` が返ることがあるので最大 3 回リトライする
+  ベンチではノイズで `ERR ENGINE_RUNNING` が返ることがあるので最大 5 回リトライする
 - **稼働中は RPM 列を編集できない**。`MAP SET` は該当 RPM が無いと行を挿入する仕様なので、走行中に意図せずテーブル構造が変わるのを防ぐ
 - ライブ適用は明示的に有効化したときだけ動き、**60 秒無操作で自動解除**。  
   1 操作の変化量が噴射 ±1.0ms / 進角 ±5CA を超える場合は送らない

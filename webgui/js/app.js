@@ -258,8 +258,9 @@ async function uploadFull() {
     say(`転送に失敗しました（実機のMAPは変更されていません）: ${e.message}`, 'error');
   } finally {
     state.busy = false;
-    // 成功していれば実機＝編集中なので差分が消える。失敗時は実機の実際の値に戻す。
-    await readFromDevice({ syncEdit: true });
+    // 編集内容は上書きしない。成功していれば実機＝編集中なので差分表示は自然に消え、
+    // 失敗したときは残った差分がそのまま「まだ入っていない分」を示す。
+    await readFromDevice();
   }
 }
 
@@ -281,21 +282,25 @@ async function pushDelta() {
     say(`ライブ反映に失敗しました: ${e.message}`, 'error');
   } finally {
     state.busy = false;
-    await readFromDevice({ syncEdit: true });
+    await readFromDevice();
   }
 }
 
-/** 転送後の検証。全行読み戻すより速く、実機の内部表現と直接比較できる。 */
-async function verifyCrc() {
+/**
+ * 転送後の検証。全行読み戻すより速く、実機の内部表現と直接比較できる。
+ * quiet=true なら一致時に何も言わない（ライブ適用でログが埋まらないように）。
+ */
+async function verifyCrc({ quiet = false } = {}) {
   try {
     const inf = await state.transport.command('MAP INFO');
     const info = parseInfo(inf.body);
+    state.info = info;                    // ヘッダのCRC表示もここで更新される
     const expect = M.crc16(state.rows);
     if (info.crc !== expect) {
       say(`CRC不一致: 期待 ${M.hex4(expect)} / 実機 ${M.hex4(info.crc)}`, 'error');
       return false;
     }
-    say(`CRC検証OK: ${M.hex4(expect)}`, 'ok');
+    if (!quiet) say(`CRC検証OK: ${M.hex4(expect)}`, 'ok');
     return true;
   } catch (e) {
     say(`CRC検証に失敗しました: ${e.message}`, 'warn');
@@ -363,33 +368,71 @@ function applyRows(rows, { live = false } = {}) {
   if (live) maybeLiveApply();
 }
 
-/** ライブ適用モードが有効なら、変更行を即座に MAP SET で送る。 */
-async function maybeLiveApply() {
-  if (!state.liveApply || !state.connected || state.busy) return;
-  if (Date.now() > state.liveArmedUntil) {
-    state.liveApply = false;
-    say('ライブ適用が60秒無操作で自動解除されました', 'warn');
-    render();
-    return;
-  }
-  state.liveArmedUntil = Date.now() + LIVE_ARM_MS;
+let liveBusy = false;
+let livePending = false;
 
-  const d = M.diff(state.deviceRows, state.rows);
-  if (!d.breakpointsMatch) {
-    say('RPMブレークポイントが実機と違うため、ライブ適用できません（全転送が必要です）', 'warn');
-    return;
-  }
-  for (const i of d.changedRows) {
-    const r = state.rows[i];
-    const dev = state.deviceRows[i];
-    if (Math.abs(r.inj - dev.inj) > LIVE_MAX_INJ_STEP
-        || Math.abs(r.ign - dev.ign) > LIVE_MAX_IGN_STEP) {
-      say(`変化量が大きすぎます（噴射 ±${LIVE_MAX_INJ_STEP / 10}ms / 進角 ±${LIVE_MAX_IGN_STEP}CA まで）。`
-        + '「変更を送信」から明示的に反映してください。', 'warn');
-      return;
+/**
+ * ライブ適用。編集を MAP SET で即座に実機へ送る。
+ *
+ * 送信中に届いた編集は捨てずに保留し、完了後にまとめて送る。以前は state.busy を
+ * 見て黙って return していたため、矢印キーの連打やドラッグ中の編集が
+ * 取りこぼされ、「ライブ適用が有効なのに反映されない」状態になっていた。
+ *
+ * 1打鍵ごとに MAP? を読み直すと往復が重いので、OK SET が返った行だけ
+ * deviceRows をローカルで更新し、連打が収まってから CRC で一括検証する。
+ */
+async function maybeLiveApply() {
+  if (!state.liveApply || !state.connected) return;
+  livePending = true;
+  if (liveBusy) return;          // 進行中。この編集も完了後に送られる
+  liveBusy = true;
+  try {
+    while (livePending) {
+      livePending = false;
+
+      if (Date.now() > state.liveArmedUntil) {
+        state.liveApply = false;
+        say('ライブ適用が60秒無操作で自動解除されました', 'warn');
+        return;
+      }
+
+      const d = M.diff(state.deviceRows, state.rows);
+      if (!d.breakpointsMatch) {
+        say('RPMブレークポイントが実機と違うため、ライブ適用できません（全転送が必要です）', 'warn');
+        return;
+      }
+      if (!d.changedRows.length) continue;   // 送るものがない
+      state.liveArmedUntil = Date.now() + LIVE_ARM_MS;
+
+      const tooBig = d.changedRows.find((i) => (
+        Math.abs(state.rows[i].inj - state.deviceRows[i].inj) > LIVE_MAX_INJ_STEP
+        || Math.abs(state.rows[i].ign - state.deviceRows[i].ign) > LIVE_MAX_IGN_STEP));
+      if (tooBig !== undefined) {
+        say(`${state.rows[tooBig].rpm} rpm の変化量が大きすぎます`
+          + `（1回のライブ反映は噴射 ±${LIVE_MAX_INJ_STEP / 10}ms / 進角 ±${LIVE_MAX_IGN_STEP}CA まで）。`
+          + '「変更を送信」から明示的に反映してください。', 'warn');
+        return;
+      }
+
+      for (const i of d.changedRows) {
+        const r = state.rows[i];
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          await state.transport.command(`MAP SET ${r.rpm} ${r.inj} ${r.ign}`);
+          state.deviceRows[i] = { ...r };    // OK SET が返った行だけ反映済みとする
+        } catch (e) {
+          say(`ライブ反映に失敗しました（${r.rpm} rpm）: ${e.message}`, 'error');
+          return;
+        }
+      }
+      render();
     }
+    // 連打が収まったところで実機と突き合わせる（一致していれば何も言わない）
+    await verifyCrc({ quiet: true });
+  } finally {
+    liveBusy = false;
+    render();
   }
-  await pushDelta();
 }
 
 function selectedIndices() {

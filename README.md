@@ -73,12 +73,12 @@ pio device monitor -b 115200
 | NE_Z_IN | 9 | クランク角0deg基準 |
 | WH_IN | 3 | 車軸パルス入力 <BR> 1回転で1パルスIN |
 | G_IN | 5 | カムパルス入力 <BR> クランク角720°毎に1パルス入力 |
-| STR_IN | 6 | エンジンスタートスイッチ |
-| ENGOFF_IN | 7 | キルスイッチ |
-| INJ_OUT | A0 | 燃料噴射 (LOW=ON) |
-| IGN_OUT | A1 | 点火 (LOW=ON) |
-| STR_OUT | A2 | スタータリレー |
-| DISRESET_OUT | A3 | リセットランプ |
+| STR_IN | 6 | エンジンスタートスイッチ<BR>（LOW=ON） |
+| ENGOFF_IN | 7 | キルスイッチ<BR>（LOW=ON=運転状態, HIGH=OFF=停止状態） |
+| INJ_OUT | A0 | 燃料噴射<BR>（LOW=ON） |
+| IGN_OUT | A1 | 点火<BR>（LOW=ON） |
+| STR_OUT | A2 | スタータリレー<BR>（LOW=ON） |
+| DISRESET_OUT | A3 | リセットランプ<BR>（LOW=点灯, HIGH=消灯） |
 | MA735_CS | 10 | MA735 SPI CS |
 
 LOW アクティブ出力注意 (INJ/IGN/STR/DISRESET)。
@@ -114,7 +114,8 @@ LOW アクティブ出力注意 (INJ/IGN/STR/DISRESET)。
 ## 燃料噴射計算
 
 噴射終了角度: 始動時（`startState == LOW`）は `start_INJ_END_CA`、通常時は `INJ_END_CA`  
-噴射開始角度: `INJ_STR_CA`（毎サイクルリセット時に逆算）
+
+噴射開始角度: `INJ_STR_CA`（毎サイクルリセット時に逆算）  
 
 ```text
 inj_end_ca = (startState == LOW) ? start_INJ_END_CA : INJ_END_CA
@@ -126,8 +127,9 @@ INJ_STR_CA = inj_end_ca - (calculatedINJ_time * 100[µs] * 360[deg]) / tachoWidt
 `INJ_STR_CA` が負値になるため `+720` で正規化（0〜720CAの範囲に収める）。  
 `cycleReset()` 呼び出し時に噴射継続中（`INJ_Status == 2`）であれば INJ状態をリセットせず、
 タイマーで正常終了させる。  
+
 **360CA安全リセット**: 1サイクル内で360CAを通過した時点でも噴射中の場合は強制OFFし、
-意図しない噴射継続を防止（`inj360Reset` フラグで1サイクルに1回限り実行）。
+意図しない噴射継続を防止（`inj360Reset` フラグで1サイクルに1回限り実行）。  
 
 噴射時間: `calculatedINJ_time` (0.1ms単位) → 実際 µs: `injDuration = calculatedINJ_time * 100`  
 燃料量近似:
@@ -165,8 +167,8 @@ MAP は RAM 上のダブルバンク（[src/map_store.cpp](src/map_store.cpp)）
 
 ### MAP 調整 Web GUI
 
-回転数を見ながら GUI で MAP を詰めるためのアプリ（[webgui/](webgui/)）。  
-Mac / Windows 共通。  
+回転数を見ながら GUI で MAP を詰めるためのWebアプリ（[webgui/](webgui/)）。  
+Windows / macOS / Ubuntu 共通。  
 接続方法は 2 通りあり、**どちらも同じフロントエンド**が動く。
 
 | 方法 | 必要なもの | 使えるブラウザ |
@@ -252,22 +254,22 @@ python tools/send_map.py microSD/RPM_2026SUZUKA.CSV --fake
 | --- | --- | --- |
 | `MAP?` | 現在の MAP を CSV で出力 | 可 |
 | `MAP INFO` | 出所 / 行数 / CRC / EEPROM 状態 / RPM / ENG を表示 | 可 |
-| `MAP BEGIN` | 転送セッション開始（USB テレメトリを一時停止） | 可 |
-| `<rpm>,<inj>,<ign>` | セッション中の 1 行（`RPM` で始まるヘッダ行は自動スキップ） | 可 |
+| `MAP BEGIN` | 転送セッション開始<BR>（USB テレメトリを一時停止） | 可 |
+| `<rpm>,<inj>,<ign>` | セッション中の 1 行<BR>（`RPM` で始まるヘッダ行は自動スキップ） | 可 |
 | `MAP END` | 検証して原子的に反映。失敗時は破棄され現在の MAP は無傷 | 可 |
 | `MAP ABORT` | セッション破棄 | 可 |
-| `MAP SET <rpm> <inj> <ign>` | 1 行だけライブ変更（該当 RPM が無ければ昇順を保って挿入） | 可 |
-| `MAP SAVE` | EEPROM へ保存（既存内容と同一なら書き込まず `OK UNCHANGED`） | **不可** |
+| `MAP SET <rpm> <inj> <ign>` | 1 行だけライブ変更<BR>（該当 RPM が無ければ昇順を保って挿入） | 可 |
+| `MAP SAVE` | EEPROM へ保存<BR>（既存内容と同一なら書き込まず `OK UNCHANGED`） | **不可** |
 | `MAP LOAD` | EEPROM から読み直して RAM へ反映 | 可 |
-| `MAP DEFAULT` | 内蔵 `defaultMap` へ戻す（EEPROM は変更しない） | 可 |
-| `TELEM ON [ms]` | 機械可読テレメトリを開始（既定 OFF、100〜2000ms、100ms 単位） | 可 |
+| `MAP DEFAULT` | 内蔵 `defaultMap` へ戻す<BR>（EEPROM は変更しない） | 可 |
+| `TELEM ON [ms]` | 機械可読テレメトリを開始<BR>（既定 OFF、100〜2000ms、100ms 単位） | 可 |
 | `TELEM OFF` | 停止して従来の 2Hz 人間向け出力へ戻す | 可 |
 | `TELEM?` | `on=` / `ms=` / `drop=`（取りこぼし数）を表示 | 可 |
 | `VER` | `OK VER <fw> proto=<n>` | 可 |
-| `PING` | `OK PONG`（副作用のない疎通確認・レイテンシ計測） | 可 |
+| `PING` | `OK PONG`<BR>（副作用のない疎通確認・レイテンシ計測） | 可 |
 | `HELP` | コマンド一覧 | 可 |
 
-セッションを開いたままホストが消えた場合に備え、**最終受信から 5 秒で `ERR SESSION_TIMEOUT`**を返してセッションを破棄する。  
+セッションを開いたままホストが消えた場合に備え、**最終受信から 5 秒で** `ERR SESSION_TIMEOUT` を返してセッションを破棄する。  
 （テレメトリがミュートされたまま復帰しなくなるのを防ぐ）
 
 ### 機械可読テレメトリ（`TELEM`）
@@ -507,7 +509,7 @@ java -jar "$env:USERPROFILE\.vscode\extensions\jebbs.plantuml-2.18.1\plantuml.ja
 
 評価結果:
 
-- [document/debug_report_20260330.md](document/debug_report_20260330.md)
+- [document/10HzLogging_debug_report_20260912.md](document/10HzLogging_debug_report_20260912.md)
 
 ## ライセンス
 

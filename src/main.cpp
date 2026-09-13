@@ -26,6 +26,7 @@ void IRAM_ATTR G_PULSE_ISR();
 #define ROUTINE_CYCLE_US     24
 #define STATUS_TASK_DELAY_MS  100   // タスク基本周期: 100ms (10Hz)
 #define SERIAL_USB_DIVISOR      5   // USB Serial 分周比: 5回に1回 = 500ms (2Hz)
+#define TELEM_LINE_MAX         96   // 機械可読テレメトリ1行のバッファ長
 
 #define PERIMETER_MM         1548UL   // [mm]
 #define TACHO_RPM_MAX        6000     // レブリミット（RPM）※これを超えると燃料噴射・点火停止
@@ -84,6 +85,10 @@ volatile int16_t  calculatedIGN_CA   = 0; // 点火進角角度（CA）
 // calculatedIGN_CA==0 は「0の値が入ったMAP行」と区別できないため、
 // 点火・噴射の新規トリガ可否はこのフラグで判定する（進行中のON_HOLDは止めない）。
 volatile bool     mapOutOfRange      = false;
+// 現在採用中のMAP行インデックス（255 = MAP未使用。始動時・MAP範囲外）。
+// GUIのライブトレースが「実機が実際に採用した行」を推測せずに表示できるようにする。
+// ISRから書くが、uint8_tの単一ストアはtearingしないためロック不要。
+volatile uint8_t  activeMapRow       = 255;
 volatile int16_t  Dwell_Time_CA      = 0; // ドゥエル時間（IGコイルへの充電時間）をクランク角度（CA）へ変換
 volatile int16_t  INJ_STR_CA         = 0; // 燃料噴射開始タイミング角度（CA）※INJ_END_CAと噴射時間から逆算
 volatile uint8_t  INJ_Status         = 1; // 燃料噴射状態（0:OFF, 1:ON, 2:ON_HOLD）
@@ -241,6 +246,7 @@ void updateEngineMap() {
     calculatedINJ_time = start_INJ_time;
     calculatedIGN_CA   = start_IGN_CA;
     mapOutOfRange = false;
+    activeMapRow  = 255;                // 始動時はMAPを使わず固定値
   }
   // スタータOFFの場合
   else {
@@ -252,6 +258,7 @@ void updateEngineMap() {
         calculatedINJ_time = map.e[i].inj_time;
         calculatedIGN_CA   = map.e[i].ign_ca;
         mapOutOfRange = false;
+        activeMapRow  = i;
         return;
       }
     }
@@ -259,6 +266,7 @@ void updateEngineMap() {
     calculatedINJ_time = 0;
     calculatedIGN_CA   = 0;
     mapOutOfRange = true;
+    activeMapRow  = 255;
     return;
   }
 }
@@ -441,7 +449,12 @@ void statusTask(void *pvParameters) {
   (void)pvParameters;
   TickType_t xLastWakeTime = xTaskGetTickCount();
   uint8_t div_cnt = 0;
+  uint8_t tel_cnt = 0;
+  uint16_t telSeq = 0;
   char s1buf[64];
+  // configCHECK_FOR_STACK_OVERFLOW=0 でスタック破壊が静かに起きるため、
+  // テレメトリ用バッファはスタックではなくstaticに置く。
+  static char telBuf[TELEM_LINE_MAX];
 
   for (;;) {
     // ── 高速パス（10Hz）──────────────────────────────────────────────────
@@ -463,6 +476,46 @@ void statusTask(void *pvParameters) {
         dis10 / 10, dis10 % 10,       // dispergas
         (unsigned)worktime);          // worktime
       if (len > 0) Serial1.write((uint8_t*)s1buf, (size_t)len);
+    }
+
+    // ── 機械可読テレメトリ（TELEM ON のときだけ。既定OFF）────────────────
+    // 書式: T\t<seq>\t<ms>\t<rpm>\t<inj01>\t<ign>\t<spd01>\t<ne>\t<row>\t<flags>
+    // タブ区切りを保つのは、tools/send_map.py が「タブを含む行=テレメトリ」として
+    // 読み飛ばす実装になっているため（CLIを無改造のまま使える）。
+    if (SerialUSBEnabled && mapConsoleTelemetryStream() && !mapConsoleTelemetryMuted()) {
+      if (++tel_cnt >= mapConsoleTelemetryDivisor()) {
+        tel_cnt = 0;
+        // USB CDCのwrite()は、ホストが接続したまま読まない状態だとFIFOが空くまで
+        // 無限にスピンする（SerialUSB.cpp）。usbLockを握ったままそうなると
+        // コンソールが永久に応答しなくなるので、空きを確認してから書く。
+        if (Serial.availableForWrite() >= TELEM_LINE_MAX) {
+          uint8_t flags = (ENG_ON ? 0x01 : 0)
+                        | (Launch ? 0x02 : 0)
+                        | (startState == LOW ? 0x04 : 0)
+                        | (mapOutOfRange ? 0x08 : 0);
+          int len = snprintf(telBuf, sizeof(telBuf),
+            "T\t%u\t%lu\t%u\t%u\t%d\t%lu\t%d\t%u\t%u\n",
+            (unsigned)(++telSeq),          // 連番（取りこぼし検出）
+            (unsigned long)millis(),       // 時刻 [ms]
+            (unsigned)tachoRpm,            // 回転数 [rpm]
+            (unsigned)calculatedINJ_time,  // 噴射時間 [x0.1ms]
+            (int)calculatedIGN_CA,         // 点火進角 [CA]
+            speed,                         // 車速 [x0.1km/h]
+            (int)Ne_deg,                   // クランク角 [CA]
+            (unsigned)activeMapRow,        // 採用中のMAP行（255=MAP未使用）
+            (unsigned)flags);
+          // テレメトリよりコマンド応答性を優先する。取れなければ捨てる
+          // （落ちた分はseqの飛びでGUI側が検出できる）。
+          if (len > 0 && mapConsoleUsbLock(pdMS_TO_TICKS(5))) {
+            Serial.write((const uint8_t*)telBuf, (size_t)len);
+            mapConsoleUsbUnlock();
+          } else {
+            mapConsoleTelemetryDropped();
+          }
+        } else {
+          mapConsoleTelemetryDropped();
+        }
+      }
     }
 
     // ── 低速パス（2Hz: 5回に1回）─────────────────────────────────────────
@@ -505,7 +558,8 @@ void statusTask(void *pvParameters) {
 
       // MAP転送セッション中はUSBテレメトリを止め、コンソール応答だけを流す。
       // Serial1(メーター・ロガー)側は常に出力し続ける。
-      if (SerialUSBEnabled && !mapConsoleTelemetryMuted()) {
+      // TELEM ON のときは上の機械可読行に一本化し、2つの書式が混ざらないようにする。
+      if (SerialUSBEnabled && !mapConsoleTelemetryMuted() && !mapConsoleTelemetryStream()) {
         if (mapConsoleUsbLock(pdMS_TO_TICKS(50))) {
           Serial.print(tachoRpm);
           Serial.print("\t");

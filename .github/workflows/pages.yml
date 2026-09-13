@@ -1,0 +1,55 @@
+# webgui/ を GitHub Pages へ配信する。
+#
+# バンドラを使っていないので、ディレクトリをそのまま上げるだけでよい。
+# Web Serial API は secure context が必須なので、https で配信される Pages が要件を満たす。
+#
+# 初回だけ リポジトリの Settings > Pages > Source を "GitHub Actions" にすること。
+
+name: Deploy Web GUI to Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'webgui/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      # 検証規則とCRCがファーム(src/map_store.cpp)と一致しているかを確認する
+      - run: node --test "webgui/test/*.test.mjs"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python3 tools/test_map_protocol.py
+
+  deploy:
+    needs: test
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: webgui
+      - id: deployment
+        uses: actions/deploy-pages@v4

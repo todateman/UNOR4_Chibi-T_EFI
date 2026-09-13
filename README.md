@@ -163,9 +163,62 @@ MAP は RAM 上のダブルバンク（[src/map_store.cpp](src/map_store.cpp)）
   起動時に `MAP SOURCE: EEPROM (15 rows)` のようにどちらを使ったか出力する。
 - 書き換えは AGTimer 割り込みから参照されるバンクを非アクティブ側で組み立ててから 1 バイトのストアで切り替えるため、**エンジン稼働中でも安全に反映できる**。
 
+### MAP 調整 Web GUI
+
+回転数を見ながら GUI で MAP を詰めるためのアプリ（[webgui/](webgui/)）。  
+Mac / Windows 共通。  
+接続方法は 2 通りあり、**どちらも同じフロントエンド**が動く。
+
+| 方法 | 必要なもの | 使えるブラウザ |
+| --- | --- | --- |
+| GitHub Pages（Web Serial） | なし（ブラウザだけ） | Chrome / Edge |
+| ローカルサーバ | Python 3 + `pyserial` | すべて |
+
+```sh
+# ローカルサーバ（追加の依存なし。標準ライブラリ + pyserial だけ）
+python3 tools/map_gui.py                     # ポート自動検出、ブラウザを開く
+python3 tools/map_gui.py --port /dev/cu.usbmodem1101
+python3 tools/map_gui.py --fake              # 実機なしでGUIを試す（モックECU）
+```
+
+GitHub Pages 版は `https://todateman.github.io/UNOR4_Chtbi-T_EFI/` で、
+Chrome / Edge の「Web Serial で接続」から直接 USB に繋がる。  
+外部 CDN を一切使っておらず Service Worker を積んであるので、**一度開けばピットでオフラインでも動く**。  
+
+できること:
+
+- CSV の読み込み / 書き出し（`microSD/RPM_*.CSV` と同じ書式）
+- グラフの点をドラッグして編集。選択範囲に ±5% / ±1 段 / 線形補間 / 平滑化
+- Undo / Redo（Ctrl+Z / Ctrl+Shift+Z）と、実機 MAP との差分表示
+- **ライブトレース**: 現在の回転数と、ファームが実際に採用している行をハイライト。  
+  行ごとの滞在時間をヒートマップで表示
+- **ライブ適用**: RPM ブレークポイントが実機と一致していれば、変更行だけを `MAP SET` で送る。  
+  セッションを使わないのでテレメトリが途切れず、エンジンを止める必要もない
+- テレメトリの CSV 記録と再生
+- 転送後は **CRC で検証**する（全行読み戻すより速く、実機の内部表現と直接比較できる）
+
+安全のために GUI 側で次を強制している。
+
+- `MAP SAVE` は `eng=OFF` かつ `rpm=0` のときだけ押せる。  
+  ベンチではノイズで `ERR ENGINE_RUNNING` が返ることがあるので最大 3 回リトライする
+- **稼働中は RPM 列を編集できない**。`MAP SET` は該当 RPM が無いと行を挿入する仕様なので、走行中に意図せずテーブル構造が変わるのを防ぐ
+- ライブ適用は明示的に有効化したときだけ動き、**60 秒無操作で自動解除**。  
+  1 操作の変化量が噴射 ±1.0ms / 進角 ±5CA を超える場合は送らない
+- 送信前にファームと同じ規則で検証し、違反セルを赤表示して転送を止める
+- **MAP 最終行の RPM がレブリミット（`TACHO_RPM_MAX` = 6000）より手前だと警告する**。  
+  最終行を超えると噴射・点火が止まる（`mapOutOfRange`）ため
+
+テストは実機なしで走る。  
+
+```sh
+node --test "webgui/test/*.test.mjs"   # 検証規則・CRC・編集操作・行分類
+python3 tools/test_map_protocol.py     # プロトコル往復（モックECU）
+```
+
 ### MAP の書き換え（PC 側スクリプト）
 
-`microSD/RPM_*.CSV` と同じ書式の CSV をそのまま送れる。`pyserial` が必要。
+`microSD/RPM_*.CSV` と同じ書式の CSV をそのまま送れる。`pyserial` が必要。  
+プロトコルの実装は [tools/map_protocol.py](tools/map_protocol.py) にあり、Web GUI と共有している。
 
 ```sh
 pip install pyserial
@@ -182,9 +235,13 @@ python tools/send_map.py --dump > current_map.csv
 # 状態確認 / ポート明示
 python tools/send_map.py --info
 python tools/send_map.py map.csv --port /dev/cu.usbmodem1101
+
+# 実機なしで動作確認（モックECU）
+python tools/send_map.py microSD/RPM_2026SUZUKA.CSV --fake
 ```
 
-転送後は自動で読み戻して送信内容と一致するか検証し、不一致なら非ゼロ終了する。
+送信前にファームと同じ規則で検証し、通らない CSV は実機に触れる前に弾く。  
+転送後は `MAP INFO` の CRC と自前の計算値を突き合わせて検証し、不一致なら非ゼロ終了する。
 
 ### MAP コンソールコマンド
 
@@ -203,7 +260,49 @@ python tools/send_map.py map.csv --port /dev/cu.usbmodem1101
 | `MAP SAVE` | EEPROM へ保存（既存内容と同一なら書き込まず `OK UNCHANGED`） | **不可** |
 | `MAP LOAD` | EEPROM から読み直して RAM へ反映 | 可 |
 | `MAP DEFAULT` | 内蔵 `defaultMap` へ戻す（EEPROM は変更しない） | 可 |
+| `TELEM ON [ms]` | 機械可読テレメトリを開始（既定 OFF、100〜2000ms、100ms 単位） | 可 |
+| `TELEM OFF` | 停止して従来の 2Hz 人間向け出力へ戻す | 可 |
+| `TELEM?` | `on=` / `ms=` / `drop=`（取りこぼし数）を表示 | 可 |
+| `VER` | `OK VER <fw> proto=<n>` | 可 |
+| `PING` | `OK PONG`（副作用のない疎通確認・レイテンシ計測） | 可 |
 | `HELP` | コマンド一覧 | 可 |
+
+セッションを開いたままホストが消えた場合に備え、**最終受信から 5 秒で `ERR SESSION_TIMEOUT`**を返してセッションを破棄する。  
+（テレメトリがミュートされたまま復帰しなくなるのを防ぐ）
+
+### 機械可読テレメトリ（`TELEM`）
+
+GUI のライブトレース用に、`statusTask` の高速パス（100ms 周期）から出力する。  
+**既定は OFF** なので、`tools/send_map.py` やシリアルモニタの見え方は従来どおり変わらない。  
+`TELEM ON` の間は 2Hz の人間向けタブ行を止め、2 つの書式が混ざらないようにする。
+
+```text
+T\t<seq>\t<ms>\t<rpm>\t<inj01>\t<ign>\t<spd01>\t<ne>\t<row>\t<flags>
+```
+
+| 欄 | 内容 | 単位 |
+| --- | --- | --- |
+| `seq` | 連番（uint16 wrap）。取りこぼし検出に使う | — |
+| `ms` | `millis()` | ms |
+| `rpm` | `tachoRpm` | RPM |
+| `inj01` | `calculatedINJ_time` | ×0.1ms |
+| `ign` | `calculatedIGN_CA` | CA |
+| `spd01` | `speed` | ×0.1km/h |
+| `ne` | `Ne_deg` | CA |
+| `row` | 採用中の MAP 行 index（255 = MAP 未使用。始動時・範囲外） | — |
+| `flags` | bit0 `ENG_ON` / bit1 `Launch` / bit2 クランキング / bit3 `mapOutOfRange` | — |
+
+- **タブ区切りを保っている**のは、`send_map.py` が「タブを含む行＝テレメトリ」として
+  読み飛ばす実装だから。  
+  この書式なら CLI を 1 行も変えずに共存できる。
+- **整数のみ**。newlib-nano の `snprintf` が `%.1f` 非対応なのに合わせてある。  
+  単位換算は PC 側の責務。
+- `row` をファームから出しているのは、GUI が「実機が実際に採用した行」を推測せずに
+  表示できるようにするため。  
+  クランキング中（`startState == LOW`）は MAP を使わず `start_INJ_time` 固定なので、PC 側の推測は必ずズレる。
+- USB CDC の `write()` はホストが接続したまま読まないと FIFO が空くまで無限にスピンする。  
+  `usbLock` を握ったままそうなるとコンソールが応答しなくなるため、 `Serial.availableForWrite()` で空きを確認してから書き、足りなければそのサンプルを捨てる。  
+  （落ちた分は `seq` の飛びで GUI が検出できる）
 
 ### 検証ルール
 

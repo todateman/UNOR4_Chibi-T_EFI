@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MAP チューナ — UNO R4 Chtbi-T EFI</title>
+<link rel="stylesheet" href="./css/app.css">
+</head>
+<body>
+
+<header class="bar">
+  <div class="row">
+    <strong class="brand">MAP チューナ</strong>
+    <span id="conn-state" class="pill">未接続</span>
+    <span id="fw-state" class="dim mono"></span>
+    <span class="spacer"></span>
+    <button id="btn-webserial" type="button">Web Serial で接続</button>
+    <button id="btn-bridge" type="button">ローカルサーバ経由</button>
+    <button id="btn-fake" type="button" title="実機なしで GUI を試す">モック ECU</button>
+    <button id="btn-disconnect" type="button">切断</button>
+  </div>
+  <div class="row sub">
+    <span id="map-state" class="dim mono"></span>
+  </div>
+</header>
+
+<section class="live">
+  <span id="run-badge" class="badge stop">停止</span>
+  <span class="kv"><label>回転数</label><b id="v-rpm">—</b><i>rpm</i></span>
+  <span class="kv"><label>噴射</label><b id="v-inj">—</b><i>ms</i></span>
+  <span class="kv"><label>進角</label><b id="v-ign">—</b><i>CA</i></span>
+  <span class="kv"><label>車速</label><b id="v-spd">—</b><i>km/h</i></span>
+  <span class="kv"><label>採用行</label><b id="v-row">—</b></span>
+  <span id="cut-badge" class="badge cut" hidden>噴射・点火停止</span>
+</section>
+
+<section class="toolbar">
+  <div class="group">
+    <label class="lbl">ファイル</label>
+    <label class="btn" for="file-csv">CSV 読込</label>
+    <input id="file-csv" type="file" accept=".csv,.CSV" hidden>
+    <button id="btn-export" type="button">CSV 書出</button>
+  </div>
+  <div class="group">
+    <label class="lbl">実機</label>
+    <button id="btn-read" type="button">読出</button>
+    <button id="btn-push" type="button" class="primary">変更を送信</button>
+    <button id="btn-upload" type="button">全転送</button>
+    <button id="btn-save" type="button">EEPROM 保存</button>
+    <button id="btn-load" type="button">EEPROM 読直し</button>
+    <button id="btn-default" type="button">既定へ戻す</button>
+  </div>
+  <div class="group">
+    <label class="lbl">編集</label>
+    <button id="btn-undo" type="button" title="Ctrl/Cmd+Z">↶</button>
+    <button id="btn-redo" type="button" title="Ctrl/Cmd+Shift+Z">↷</button>
+    <button id="btn-revert" type="button">実機値へ</button>
+    <span id="diff-count" class="dim"></span>
+  </div>
+  <div class="group">
+    <button id="btn-live" type="button" class="toggle"
+      title="編集を即座に MAP SET で送ります。60秒無操作で自動解除されます。">🔒 ライブ適用</button>
+  </div>
+</section>
+
+<main>
+  <div class="charts">
+    <div class="panel">
+      <div class="panel-head">
+        <span>噴射時間 (ms)</span>
+        <span class="dim">点をドラッグで編集</span>
+      </div>
+      <canvas id="chart-inj"></canvas>
+    </div>
+    <div class="panel">
+      <div class="panel-head">
+        <span>点火進角 (CA)</span>
+        <span class="dim">赤帯 = 噴射・点火が止まる領域</span>
+      </div>
+      <canvas id="chart-ign"></canvas>
+    </div>
+    <div class="opts">
+      <label><input id="opt-device" type="checkbox" checked> 実機MAPを重ねる</label>
+      <label><input id="opt-dwell" type="checkbox" checked> 滞在ヒートマップ</label>
+      <button id="btn-resetdwell" type="button">滞在リセット</button>
+    </div>
+  </div>
+
+  <aside class="side">
+    <div id="table" class="table" tabindex="0"></div>
+
+    <div class="edit-tools">
+      <div class="row">
+        <label><input type="radio" name="field" id="field-inj" checked> 噴射</label>
+        <label><input type="radio" name="field" id="field-ign"> 進角</label>
+        <span class="spacer"></span>
+        <button id="btn-selall" type="button">全選択</button>
+        <button id="btn-selnone" type="button">選択解除</button>
+      </div>
+      <div class="row">
+        <button id="btn-plus5" type="button">+5%</button>
+        <button id="btn-minus5" type="button">-5%</button>
+        <button id="btn-plus1" type="button">+1 段</button>
+        <button id="btn-minus1" type="button">-1 段</button>
+        <button id="btn-interp" type="button">線形補間</button>
+        <button id="btn-smooth" type="button">平滑化</button>
+      </div>
+      <p class="hint dim">
+        選択が無いときは全行が対象。「+1 段」は噴射 +0.1ms / 進角 +1CA。
+        表のセルでは ↑↓ で 1 段、Shift+↑↓ で 10 段動きます。
+      </p>
+    </div>
+
+    <div id="issues" class="issues"></div>
+  </aside>
+</main>
+
+<footer class="bottom">
+  <div class="row">
+    <button id="btn-record" type="button">● 記録開始</button>
+    <span id="rec-count" class="dim"></span>
+    <button id="btn-savelog" type="button">ログ保存</button>
+    <label class="btn" for="file-log">ログ読込・再生</label>
+    <input id="file-log" type="file" accept=".csv,.CSV" hidden>
+    <button id="btn-stopreplay" type="button">再生停止</button>
+  </div>
+  <div id="log" class="log"></div>
+</footer>
+
+<script type="module" src="./js/app.js"></script>
+</body>
+</html>

@@ -4,6 +4,9 @@
 USBシリアル(CDC)経由で ECU の MAP コンソールに CSV を流し込む。
 CSV は microSD/RPM_*.CSV と同じ書式（rpm, inj_time(x0.1msec), ign_ca）。
 
+プロトコルの実装は tools/map_protocol.py にあり、Web GUI（tools/map_gui.py）と
+共有している。
+
 必要なもの:
     pip install pyserial
 
@@ -19,145 +22,44 @@ CSV は microSD/RPM_*.CSV と同じ書式（rpm, inj_time(x0.1msec), ign_ca）�
 
     # ポートを明示する
     python tools/send_map.py map.csv --port /dev/cu.usbmodem1101
+
+    # 実機なしで動作確認する（モックECU）
+    python tools/send_map.py microSD/RPM_2026SUZUKA.CSV --fake
 """
 
 import argparse
+import os
 import sys
 import time
 
-try:
-    import serial
-    from serial.tools import list_ports
-except ImportError:
-    sys.exit("pyserial が必要です:  pip install pyserial")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-BAUD = 115200
-# 応答待ちタイムアウト。MAP SAVE はデータフラッシュの消去+書き込みを含むので長めに取る。
-ACK_TIMEOUT = 3.0
-SAVE_TIMEOUT = 10.0
-
-# Arduino UNO R4 Minima (Renesas RA4M1) の VID
-ARDUINO_VIDS = (0x2341, 0x2A03)
+import map_protocol as mp
+from map_protocol import MapConsole, MapConsoleError
 
 
-class MapConsoleError(RuntimeError):
-    pass
-
-
-def find_port() -> str:
-    candidates = [p for p in list_ports.comports() if p.vid in ARDUINO_VIDS]
-    if not candidates:
-        # VIDで見つからない場合は usbmodem / ttyACM を拾う
-        candidates = [
-            p for p in list_ports.comports()
-            if "usbmodem" in p.device or "ttyACM" in p.device
-        ]
-    if not candidates:
-        raise MapConsoleError(
-            "シリアルポートが見つかりません。--port で明示してください。")
-    if len(candidates) > 1:
-        names = ", ".join(p.device for p in candidates)
-        raise MapConsoleError(
-            f"候補が複数あります ({names})。--port で明示してください。")
-    return candidates[0].device
-
-
-def send_line(ser: serial.Serial, line: str, timeout: float = ACK_TIMEOUT):
-    """1行送って OK/ERR の応答行が返るまで待つ。
-
-    応答前に出てくる行（MAP? のCSV本体や INFO 行）は body として返す。
-    テレメトリ行はタブ区切りなので、それらは読み飛ばす。
-    """
-    ser.reset_input_buffer()
-    ser.write((line + "\n").encode("ascii"))
-    ser.flush()
-
-    body = []
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        raw = ser.readline()
-        if not raw:
-            continue
-        text = raw.decode("ascii", errors="replace").strip()
-        if not text:
-            continue
-        if text.startswith("OK"):
-            return text, body
-        if text.startswith("ERR"):
-            raise MapConsoleError(f"{line!r} -> {text}")
-        if "\t" in text:
-            continue  # 500ms周期のテレメトリ行
-        body.append(text)
-    raise MapConsoleError(f"{line!r} への応答がありません（タイムアウト）")
-
-
-def read_csv_rows(path: str):
-    """CSVファイルから (rpm, inj, ign) のリストを読む。ヘッダ・空行・#行は無視。"""
-    rows = []
-    with open(path, "r", encoding="utf-8-sig") as f:
-        for lineno, raw in enumerate(f, 1):
-            line = raw.strip()
-            if not line or line[0] in "#;":
-                continue
-            if not line[0].isdigit():
-                continue  # ヘッダ行
-            parts = [c.strip() for c in line.split(",")]
-            if len(parts) < 3:
-                raise MapConsoleError(f"{path}:{lineno} 列が足りません: {line}")
-            try:
-                rpm, inj, ign = (int(parts[0]), int(parts[1]), int(parts[2]))
-            except ValueError:
-                raise MapConsoleError(f"{path}:{lineno} 数値ではありません: {line}")
-            rows.append((rpm, inj, ign))
-    if not rows:
-        raise MapConsoleError(f"{path} に有効な行がありません")
-    return rows
-
-
-def dump_map(ser: serial.Serial):
-    """現在のMAPを (rpm, inj, ign) のリストとして取得する。"""
-    ack, body = send_line(ser, "MAP?")
-    rows = []
-    for line in body:
-        if not line or not line[0].isdigit():
-            continue
-        parts = [c.strip() for c in line.split(",")]
-        if len(parts) < 3:
-            continue
-        rows.append((int(parts[0]), int(parts[1]), int(parts[2])))
-    return rows
-
-
-def transfer(ser: serial.Serial, rows, save: bool):
-    print(f"転送中: {len(rows)} 行")
-    send_line(ser, "MAP BEGIN")
-    try:
-        for rpm, inj, ign in rows:
-            send_line(ser, f"{rpm},{inj},{ign}")
-        send_line(ser, "MAP END")
-    except MapConsoleError:
-        try:
-            send_line(ser, "MAP ABORT")
-        except MapConsoleError:
-            pass
-        raise
-
-    written = dump_map(ser)
-    if written != rows:
-        raise MapConsoleError(
-            "読み戻し検証に失敗しました。\n"
-            f"  送信: {rows}\n  実機: {written}")
-    print("RAMへ反映しました（読み戻し検証OK）")
-
-    if save:
-        ack, _ = send_line(ser, "MAP SAVE", timeout=SAVE_TIMEOUT)
-        if "UNCHANGED" in ack:
-            # 保存済み内容と同一。データフラッシュの摩耗を避けるため書き込まれていない。
-            print("EEPROMの内容は同一のため書き込みませんでした")
-        else:
-            print("EEPROMへ保存しました")
+def open_link(args):
+    """(console, closer) を返す。--fake なら実機の代わりにモックECUへ繋ぐ。"""
+    if args.fake:
+        from fake_ecu import FakeSerial
+        ser = FakeSerial()
     else:
-        print("EEPROMには保存していません（--save で永続化）")
+        try:
+            import serial
+        except ImportError:
+            sys.exit("pyserial が必要です:  pip install pyserial")
+        port = args.port or mp.find_port()
+        ser = serial.Serial(port, mp.BAUD, timeout=0.2)
+        time.sleep(0.3)          # CDCの立ち上がり待ち
+        ser.reset_input_buffer()
+
+    console = MapConsole(ser)
+
+    def closer():
+        console.close()
+        ser.close()
+
+    return console, closer
 
 
 def main() -> int:
@@ -171,38 +73,57 @@ def main() -> int:
                     help="現在のMAPをCSVとして標準出力に書き出す")
     ap.add_argument("--info", action="store_true",
                     help="MAPの出所・行数・CRC・EEPROM状態を表示する")
+    ap.add_argument("--fake", action="store_true",
+                    help="実機の代わりにモックECUへ繋ぐ（動作確認用）")
     args = ap.parse_args()
 
     if not args.dump and not args.info and not args.csv:
         ap.error("CSVファイルを指定するか --dump / --info を使ってください")
 
+    closer = None
     try:
-        port = args.port or find_port()
-        rows = read_csv_rows(args.csv) if args.csv else None
+        rows = mp.read_csv_rows(args.csv) if args.csv else None
+        if rows is not None:
+            # ファームと同じ規則で先に検証しておき、途中で弾かれるのを避ける
+            err = mp.validate(rows)
+            if err:
+                raise MapConsoleError(f"{args.csv} は転送できません: {err}")
 
-        with serial.Serial(port, BAUD, timeout=0.3) as ser:
-            time.sleep(0.3)          # CDCの立ち上がり待ち
-            ser.reset_input_buffer()
+        console, closer = open_link(args)
 
-            if args.info:
-                ack, body = send_line(ser, "MAP INFO")
-                for line in body:
-                    print(line)
+        if args.info:
+            for line in console.command("MAP INFO").body:
+                print(line)
 
-            if args.dump:
-                print("RPM,  INJ(0.1msec), IGN(CA)")
-                for rpm, inj, ign in dump_map(ser):
-                    print(f"{rpm},{inj},{ign}")
+        if args.dump:
+            print(mp.format_csv(console.dump_map()), end="")
 
-            if rows is not None:
-                transfer(ser, rows, args.save)
+        if rows is not None:
+            print(f"転送中: {len(rows)} 行")
+            console.transfer(rows)
+            print(f"RAMへ反映しました（CRC検証OK: 0x{mp.crc16(rows):04X}）")
+
+            if args.save:
+                ack = console.save()
+                if "UNCHANGED" in ack.code:
+                    # 保存済み内容と同一。データフラッシュの摩耗を避けるため未書き込み。
+                    print("EEPROMの内容は同一のため書き込みませんでした")
+                else:
+                    print("EEPROMへ保存しました")
+            else:
+                print("EEPROMには保存していません（--save で永続化）")
 
     except MapConsoleError as e:
         print(f"エラー: {e}", file=sys.stderr)
         return 1
-    except serial.SerialException as e:
-        print(f"シリアルポートエラー: {e}", file=sys.stderr)
-        return 1
+    except Exception as e:                      # serial.SerialException など
+        if e.__class__.__name__ == "SerialException":
+            print(f"シリアルポートエラー: {e}", file=sys.stderr)
+            return 1
+        raise
+    finally:
+        if closer:
+            closer()
     return 0
 
 

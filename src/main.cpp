@@ -108,6 +108,18 @@ bool Launch = false;                      // スタートフラグ（エンジ�
 bool startState = HIGH;                   // スタートスイッチ状態（OFF=HIGH, ON=LOW）
 bool lastStartState = HIGH;               // スタートスイッチの前回状態   
 bool STR_IN_state = false;                // エンジン始動状態
+
+// スタータ状態マシン（Issue #11: スタータ制御の自動化）
+// 始動用MAP切替フラグ（useStartMap相当）は不要。MAPは低rpm行を自動的に採用するため。
+enum StarterState : uint8_t {
+  STR_IDLE = 0, STR_CRANKING = 1, STR_STARTED = 2, STR_FAILED = 3
+};
+StarterState  starterState    = STR_IDLE; // 現在のスタータ状態（IDLE:待機, CRANKING:クランキング中, STARTED:始動成功, FAILED:始動失敗）
+uint16_t      start_RPM       = 1500;     // 始動成功判定の回転数（RPM）
+unsigned long strCrankStartMs = 0;        // クランキング開始時刻（ms）
+unsigned long starterFirstMs  = 0;        // start_RPM到達判定の開始時刻（ms）
+bool          starterActive   = false;    // start_RPM維持判定中フラグ
+
 volatile float gasml       = 0.0;         // 燃料消費量（ml）
 volatile float INJ_timems  = 0.0;         // 燃料噴射時間（ms）
 volatile float dispergas   = 0.0;         // 燃費（km/L）
@@ -338,13 +350,21 @@ void Routine() {
     CycleReset = false;
   }
 
-  // スタートスイッチの状態がOFF->ONに変化した場合
+  // スタートスイッチ立上りエッジ検出（OFF→ON）
   if (lastStartState == HIGH && startState == LOW) {
-    // delayMicroseconds(5000);       // 5ms待機してから状態を確認
-    if (fastestdigitalRead(STR_IN) == LOW) {  // スタートスイッチがONの場合
-      // 同期データ初期化
-      // Ne_deg = 0;
-      cycleReset();
+    if (fastestdigitalRead(STR_IN) == LOW) {          // スタートスイッチON
+      if (fastestdigitalRead(ENGOFF_IN) == LOW) {     // キルスイッチON（運転許可）
+        if (starterState == STR_IDLE || starterState == STR_FAILED) {
+          starterState    = STR_CRANKING;
+          strCrankStartMs = millis();
+          starterActive   = false;
+          starterFirstMs  = 0;
+          ENG_ON          = true;
+          Launch          = true;
+          if (starttime == 0) starttime = millis();
+        }
+      }
+      cycleReset();   // キルスイッチ状態に関わらず従来どおり実行
     }
   }
   lastStartState = startState;
@@ -407,24 +427,67 @@ void Routine() {
     }
   }
   
-  // キルスイッチの状態を確認
-  if (fastestdigitalRead(ENGOFF_IN) == LOW) {   // キルスイッチがONの場合（運転状態）
-    if (startState == LOW) {                      // スタートボタンON場合
-      STR_IN_state = true;
-      fastestdigitalWrite(STR_OUT, LOW);
-      Launch = true;
-      ENG_ON = true;
-      if (starttime == 0)
-        starttime = millis();
-    } else {
-      STR_IN_state = false;
-      fastestdigitalWrite(STR_OUT, HIGH);
-    }    
-  }
-  else {                                      // キルスイッチがOFFの場合（停止状態）
-    ENG_ON = false;
-    STR_IN_state = false;
-    fastestdigitalWrite(STR_OUT, HIGH);        // スタータOFF（安全のため強制的にOFFへ）
+  // キルスイッチ確認 + スタータ状態マシン
+  if (fastestdigitalRead(ENGOFF_IN) == LOW) {       // キルスイッチON（運転許可）
+    switch (starterState) {
+
+      case STR_IDLE:                                  // 待機状態
+        fastestdigitalWrite(STR_OUT, HIGH);             // スタータOFF
+        STR_IN_state = false;                           // スタータ入力状態OFF
+        break;
+
+      case STR_CRANKING: {                            // クランキング中
+        fastestdigitalWrite(STR_OUT, LOW);              // スタータON
+        STR_IN_state = true;                            // スタータ入力状態ON
+        ENG_ON = true;                                  // エンジンONフラグON
+        unsigned long nowMs = millis();                 // 現在時刻(ms)
+
+        // 始動成功判定 0.1秒維持チェック（タイムアウトより優先）
+        if (tachoRpm >= start_RPM) {
+          if (!starterActive) {                           // 始動成功判定開始
+            starterActive  = true;                          // 始動成功判定中フラグON
+            starterFirstMs = nowMs;                         // 始動成功判定開始時刻(ms)を記録
+          } else if (nowMs - starterFirstMs >= 100UL) {
+            // 始動成功
+            starterState = STR_STARTED;                     // 始動成功状態へ
+            fastestdigitalWrite(STR_OUT, HIGH);             // スタータOFF
+            STR_IN_state = false;                           // スタータ入力状態OFF
+            break;  // タイムアウト確認をスキップ
+          }
+        // 始動成功判定が途切れた場合はフラグをリセット
+        } else {
+          starterActive  = false;                         // 始動成功判定中フラグOFF
+          starterFirstMs = 0;                             // 始動成功判定開始時刻リセット
+        }
+
+        // 2秒タイムアウト
+        if (nowMs - strCrankStartMs >= 2000UL) {
+          starterState = STR_FAILED;                      // 始動失敗状態へ
+          fastestdigitalWrite(STR_OUT, HIGH);             // スタータOFF
+          STR_IN_state = false;                           // スタータ入力状態OFF
+          ENG_ON       = false;                           // エンジンONフラグOFF
+        }
+        break;
+      }
+
+      case STR_STARTED:                               // 始動成功状態
+        fastestdigitalWrite(STR_OUT, HIGH);             // スタータOFF
+        STR_IN_state = false;                           // スタータ入力状態OFF
+        ENG_ON = true;                                  // エンジンONフラグON
+        break;
+
+      case STR_FAILED:                                // 始動失敗状態（再押し待ち）
+        fastestdigitalWrite(STR_OUT, HIGH);             // スタータOFF
+        STR_IN_state = false;                           // スタータ入力状態OFF
+        ENG_ON = false;                                 // エンジンONフラグOFF
+        break;
+    }
+  } else {                                            // キルスイッチOFF（全停止）
+    ENG_ON       = false;                               // エンジンONフラグOFF
+    starterState = STR_IDLE;                            // スタータ状態IDLE
+    fastestdigitalWrite(STR_OUT, HIGH);                 // スタータOFF（安全のため強制的にOFFへ）
+    STR_IN_state = false;                               // スタータ入力状態OFF
+    // Launch はここでリセットしない（走行距離/燃費/稼働時間は競技中を通して積算し続ける仕様のため）
   }
 }
 

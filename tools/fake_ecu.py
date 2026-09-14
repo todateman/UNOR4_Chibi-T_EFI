@@ -25,22 +25,27 @@ from typing import List, Optional
 from map_protocol import (
     CSV_HEADER,
     MAP_IGN_CA_MAX,
+    MAP_INJ_END_CA_MAX,
     MAP_MAX_ENTRIES,
     MAP_RPM_MAX,
     crc16,
 )
 
-FW_VERSION = "1.1.0"
-PROTO_VERSION = 2
+FW_VERSION = "1.2.0"
+PROTO_VERSION = 3
 LINE_MAX = 96
 TELEM_BASE_MS = 100
 
-# src/map_store.cpp の defaultMap[]
+# src/map_store.cpp の defaultMap[]（rpm, inj_time, ign_ca, inj_end_ca）
 DEFAULT_MAP = [
-    (400, 40, 15), (800, 40, 15), (1200, 40, 15), (1600, 40, 15),
-    (2000, 44, 20), (2400, 44, 20), (2800, 44, 25), (3200, 42, 25),
-    (3600, 40, 25), (4000, 40, 30), (4400, 40, 30), (4800, 40, 30),
-    (5200, 40, 30), (5600, 40, 30), (6000, 40, 30),
+    (400, 0, 0, 0),        # 400RPM以下はアイドリング不能なのでエンジン停止
+    (800, 80, 0, 20),      # 800RPM以下は始動状態
+    (1200, 80, 0, 20),     # 1200RPM以下は始動状態
+    (1600, 40, 15, 680),   # 以降は通常走行域
+    (2000, 44, 20, 680), (2400, 44, 20, 680), (2800, 44, 25, 680),
+    (3200, 42, 25, 680), (3600, 40, 25, 680), (4000, 40, 30, 680),
+    (4400, 40, 30, 680), (4800, 40, 30, 680), (5200, 40, 30, 680),
+    (5600, 40, 30, 680), (6000, 40, 30, 680),
 ]
 
 TACHO_RPM_MAX = 6000   # main.cpp のレブリミット
@@ -53,11 +58,13 @@ def _validate_table(rows) -> Optional[str]:
     if len(rows) > MAP_MAX_ENTRIES:
         return "TOO_MANY_ROWS"
     prev = None
-    for rpm, _inj, ign in rows:
+    for rpm, _inj, ign, inj_end_ca in rows:
         if rpm == 0 or rpm > MAP_RPM_MAX:
             return "RPM_OUT_OF_RANGE"
         if ign > MAP_IGN_CA_MAX:
             return "IGN_CA_OUT_OF_RANGE"
+        if inj_end_ca > MAP_INJ_END_CA_MAX:
+            return "INJ_END_CA_OUT_OF_RANGE"
         if prev is not None and rpm <= prev:
             return "RPM_NOT_ASCENDING"
         prev = rpm
@@ -76,7 +83,7 @@ def _parse_csv_line(line: str):
 
     vals = []
     i = 0
-    for col in range(3):
+    for col in range(4):
         while i < len(p) and p[i] in " \t":
             i += 1
         if i >= len(p) or not p[i].isdigit():
@@ -90,7 +97,7 @@ def _parse_csv_line(line: str):
         vals.append(v)
         while i < len(p) and p[i] in " \t":
             i += 1
-        if col < 2:
+        if col < 3:
             if i >= len(p) or p[i] != ",":
                 return False, False, None
             i += 1
@@ -99,7 +106,7 @@ def _parse_csv_line(line: str):
         i += 1
     if i != len(p):
         return False, False, None
-    if vals[0] > 65535 or vals[1] > 255 or vals[2] > 65535:
+    if vals[0] > 65535 or vals[1] > 255 or vals[2] > 65535 or vals[3] > 65535:
         return False, False, None
     return True, False, tuple(vals)
 
@@ -147,7 +154,7 @@ class FakeEcu:
         return int(5200 - (5200 - 1200) * (t - 30) / 10)     # 減速
 
     def _active_row(self, rpm: int) -> int:
-        for i, (r, _i, _g) in enumerate(self.rows):
+        for i, (r, _i, _g, _e) in enumerate(self.rows):
             if rpm < r:
                 return i
         return 255
@@ -284,8 +291,8 @@ class FakeEcu:
 
     def _cmd_dump(self) -> None:
         self._write(CSV_HEADER + "\r\n")
-        for rpm, inj, ign in self.rows:
-            self._write(f"{rpm},{inj},{ign}\r\n")
+        for rpm, inj, ign, inj_end_ca in self.rows:
+            self._write(f"{rpm},{inj},{ign},{inj_end_ca}\r\n")
         self._ok(f"ROWS {len(self.rows)}")
 
     def _cmd_info(self) -> None:
@@ -308,23 +315,24 @@ class FakeEcu:
 
     def _cmd_set(self, args: str) -> None:
         parts = args.split()
-        if len(parts) < 3 or not all(x.isdigit() for x in parts[:3]):
-            return self._err("USAGE_MAP_SET_RPM_INJ_IGN")
-        rpm, inj, ign = (int(x) for x in parts[:3])
-        if rpm > 65535 or inj > 255 or ign > 65535:
+        if len(parts) < 4 or not all(x.isdigit() for x in parts[:4]):
+            return self._err("USAGE_MAP_SET_RPM_INJ_IGN_ENDCA")
+        rpm, inj, ign, inj_end_ca = (int(x) for x in parts[:4])
+        if rpm > 65535 or inj > 255 or ign > 65535 or inj_end_ca > 65535:
             return self._err("VALUE_OUT_OF_RANGE")
-        if rpm == 0 or rpm > MAP_RPM_MAX or ign > MAP_IGN_CA_MAX:
+        if (rpm == 0 or rpm > MAP_RPM_MAX or ign > MAP_IGN_CA_MAX
+                or inj_end_ca > MAP_INJ_END_CA_MAX):
             return self._err("SET_REJECTED")
-        for i, (r, _i, _g) in enumerate(self.rows):
+        for i, (r, _i, _g, _e) in enumerate(self.rows):
             if r == rpm:
-                self.rows[i] = (rpm, inj, ign)
+                self.rows[i] = (rpm, inj, ign, inj_end_ca)
                 self.source = "SERIAL"
                 return self._ok("SET")
         if len(self.rows) >= MAP_MAX_ENTRIES:
             return self._err("SET_REJECTED")
         # 該当RPMが無ければ昇順を保つ位置へ挿入する（稼働中は行数が変わる点に注意）
         pos = next((i for i, r in enumerate(self.rows) if r[0] > rpm), len(self.rows))
-        self.rows.insert(pos, (rpm, inj, ign))
+        self.rows.insert(pos, (rpm, inj, ign, inj_end_ca))
         self.source = "SERIAL"
         self._ok("SET")
 
@@ -379,10 +387,10 @@ class FakeEcu:
             "MAP?                  dump current map as CSV",
             "MAP INFO              source / rows / crc / eeprom state",
             "MAP BEGIN             start CSV transfer session",
-            "  <rpm>,<inj>,<ign>   one CSV row (header line is skipped)",
+            "  <rpm>,<inj>,<ign>,<inj_end_ca>   one CSV row (header line is skipped)",
             "MAP END               validate and apply atomically",
             "MAP ABORT             discard the session",
-            "MAP SET r i g         change one row live",
+            "MAP SET r i g e       change one row live (rpm inj ign inj_end_ca)",
             "MAP SAVE              store to EEPROM (stopped only, skip if same)",
             "MAP LOAD              reload from EEPROM",
             "MAP DEFAULT           restore built-in default map",

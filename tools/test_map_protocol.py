@@ -23,26 +23,30 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 class TestPureFunctions(unittest.TestCase):
     def test_crc_matches_device(self):
-        # 実機の MAP INFO が defaultMap に対して返す既知の値
-        self.assertEqual(mp.crc16(DEFAULT_MAP), 0x52F4)
+        # 実機の MAP INFO が defaultMap（4列）に対して返す既知の値
+        self.assertEqual(mp.crc16(DEFAULT_MAP), 0x7418)
 
     def test_crc_includes_struct_padding(self):
-        # MapEntry は 6 バイト（パディング1込み）。5バイトで詰めると値がズレる。
-        self.assertEqual(mp.crc16([(400, 40, 15)]), mp.crc16([(400, 40, 15)]))
-        self.assertNotEqual(mp.crc16([(400, 40, 15)]), mp.crc16([(400, 15, 40)]))
+        # MapEntry は 8 バイト（パディング1込み）。詰め方を誤ると値がズレる。
+        self.assertEqual(mp.crc16([(400, 40, 15, 680)]), mp.crc16([(400, 40, 15, 680)]))
+        self.assertNotEqual(mp.crc16([(400, 40, 15, 680)]), mp.crc16([(400, 15, 40, 680)]))
+        self.assertNotEqual(mp.crc16([(400, 40, 15, 680)]), mp.crc16([(400, 40, 15, 681)]))
 
     def test_validate_accepts_default(self):
         self.assertIsNone(mp.validate(DEFAULT_MAP))
 
     def test_validate_rejects(self):
         self.assertEqual(mp.validate([]), "NO_ROWS")
-        self.assertEqual(mp.validate([(0, 40, 15)]), "RPM_OUT_OF_RANGE")
-        self.assertEqual(mp.validate([(20001, 40, 15)]), "RPM_OUT_OF_RANGE")
-        self.assertEqual(mp.validate([(400, 40, 91)]), "IGN_CA_OUT_OF_RANGE")
-        self.assertEqual(mp.validate([(400, 256, 15)]), "INJ_OUT_OF_RANGE")
-        self.assertEqual(mp.validate([(400, 40, 15), (400, 40, 15)]), "RPM_NOT_ASCENDING")
-        self.assertEqual(mp.validate([(400, 40, 15), (300, 40, 15)]), "RPM_NOT_ASCENDING")
-        self.assertEqual(mp.validate([(i * 10 + 10, 40, 15) for i in range(25)]),
+        self.assertEqual(mp.validate([(0, 40, 15, 680)]), "RPM_OUT_OF_RANGE")
+        self.assertEqual(mp.validate([(20001, 40, 15, 680)]), "RPM_OUT_OF_RANGE")
+        self.assertEqual(mp.validate([(400, 40, 91, 680)]), "IGN_CA_OUT_OF_RANGE")
+        self.assertEqual(mp.validate([(400, 256, 15, 680)]), "INJ_OUT_OF_RANGE")
+        self.assertEqual(mp.validate([(400, 40, 15, 721)]), "INJ_END_CA_OUT_OF_RANGE")
+        self.assertEqual(mp.validate([(400, 40, 15, 680), (400, 40, 15, 680)]),
+                         "RPM_NOT_ASCENDING")
+        self.assertEqual(mp.validate([(400, 40, 15, 680), (300, 40, 15, 680)]),
+                         "RPM_NOT_ASCENDING")
+        self.assertEqual(mp.validate([(i * 10 + 10, 40, 15, 680) for i in range(25)]),
                          "TOO_MANY_ROWS")
 
     def test_classify_line(self):
@@ -84,7 +88,7 @@ class TestPureFunctions(unittest.TestCase):
         path = os.path.join(REPO, "microSD", "RPM_2026SUZUKA.CSV")
         rows = mp.read_csv_rows(path)
         self.assertEqual(len(rows), 15)
-        self.assertEqual(rows[0], (400, 40, 15))
+        self.assertEqual(rows[0], (400, 0, 0, 0))
         self.assertEqual(rows, DEFAULT_MAP)
         # 書き出して読み直しても同じ行になる
         tmp = os.path.join(REPO, ".pio", "test_roundtrip.csv")
@@ -94,15 +98,28 @@ class TestPureFunctions(unittest.TestCase):
         self.assertEqual(mp.read_csv_rows(tmp), rows)
         os.remove(tmp)
 
+    def test_legacy_3col_csv_requires_explicit_inj_end_ca(self):
+        """3列（旧書式）CSVは、legacy_inj_end_ca無指定だとエラーで案内されること。"""
+        path = os.path.join(REPO, "microSD", "RPM_2024SUZUKA.csv")
+        with self.assertRaises(mp.MapConsoleError) as cm:
+            mp.read_csv_rows(path)
+        self.assertIn("INJ_END_CA", str(cm.exception))
+        # 明示すれば読める
+        rows = mp.read_csv_rows(path, legacy_inj_end_ca=680)
+        self.assertTrue(all(r[3] == 680 for r in rows))
+
     def test_existing_maps_over_ign_limit(self):
-        """ign_ca > 90 の既存3ファイルが検証で弾かれることを固定する。"""
+        """ign_ca > 90 の既存3ファイルが検証で弾かれることを固定する（3列なので明示補完して読む）。"""
         bad = ["RPM_2025SUZUKA.CSV", "RPM_2025MOTEGI.csv", "RPM_2024MOTEGI.CSV"]
         for name in bad:
-            rows = mp.read_csv_rows(os.path.join(REPO, "microSD", name))
+            rows = mp.read_csv_rows(os.path.join(REPO, "microSD", name), legacy_inj_end_ca=680)
             self.assertEqual(mp.validate(rows), "IGN_CA_OUT_OF_RANGE", name)
-        for name in ["RPM.CSV", "RPM_2026SUZUKA.CSV", "RPM_2024SUZUKA.csv"]:
+        for name in ["RPM.CSV", "RPM_2026SUZUKA.CSV"]:
             rows = mp.read_csv_rows(os.path.join(REPO, "microSD", name))
             self.assertIsNone(mp.validate(rows), name)
+        rows = mp.read_csv_rows(os.path.join(REPO, "microSD", "RPM_2024SUZUKA.csv"),
+                                 legacy_inj_end_ca=680)
+        self.assertIsNone(mp.validate(rows), "RPM_2024SUZUKA.csv")
 
 
 class ConsoleTestCase(unittest.TestCase):
@@ -120,8 +137,8 @@ class TestConsole(ConsoleTestCase):
     def test_ping_and_version(self):
         self.assertLess(self.console.ping(), 1.0)
         v = self.console.version()
-        self.assertEqual(v["proto"], 2)
-        self.assertEqual(v["fw"], "1.1.0")
+        self.assertEqual(v["proto"], 3)
+        self.assertEqual(v["fw"], "1.2.0")
 
     def test_dump_matches_default(self):
         self.assertEqual(self.console.dump_map(), list(DEFAULT_MAP))
@@ -129,18 +146,18 @@ class TestConsole(ConsoleTestCase):
     def test_info(self):
         info = self.console.info()
         self.assertEqual(info["rows"], 15)
-        self.assertEqual(info["crc"], 0x52F4)
+        self.assertEqual(info["crc"], 0x7418)
         self.assertEqual(info["src"], "DEFAULT")
         self.assertEqual(info["eng"], "OFF")
 
     def test_transfer_and_verify(self):
-        rows = [(r, i + 1, g) for r, i, g in DEFAULT_MAP]
+        rows = [(r, i + 1, g, e) for r, i, g, e in DEFAULT_MAP]
         self.console.transfer(rows)
         self.assertEqual(self.console.dump_map(), rows)
         self.assertEqual(self.console.info()["crc"], mp.crc16(rows))
 
     def test_transfer_rejects_invalid_before_sending(self):
-        bad = [(400, 40, 200)]
+        bad = [(400, 40, 200, 680)]
         with self.assertRaises(mp.MapConsoleError):
             self.console.transfer(bad)
         # 現行MAPは無傷
@@ -149,8 +166,8 @@ class TestConsole(ConsoleTestCase):
     def test_failed_transfer_leaves_map_intact(self):
         """検証NGならファーム側でも全体が破棄され、現行MAPは無傷であること。"""
         self.console.command("MAP BEGIN")
-        self.console.command("400,40,15")
-        self.console.command("300,40,15")          # 昇順違反だが受理される
+        self.console.command("400,40,15,680")
+        self.console.command("300,40,15,680")          # 昇順違反だが受理される
         with self.assertRaises(mp.MapConsoleError) as cm:
             self.console.command("MAP END")
         self.assertIn("RPM_NOT_ASCENDING", str(cm.exception))
@@ -158,7 +175,7 @@ class TestConsole(ConsoleTestCase):
 
     def test_header_line_is_skipped(self):
         self.console.command("MAP BEGIN")
-        res = self.console.command("RPM,  INJ(0.1msec), IGN(CA)")
+        res = self.console.command("RPM,  INJ(0.1msec), IGN(CA), INJ_END(CA)")
         self.assertEqual(res.code, "SKIP")
         self.console.command("MAP ABORT")
 
@@ -168,8 +185,16 @@ class TestConsole(ConsoleTestCase):
             self.console.command("not a number")
         # セッションが落ちているので次の行は UNKNOWN_COMMAND になる
         with self.assertRaises(mp.MapConsoleError) as cm:
-            self.console.command("400,40,15")
+            self.console.command("400,40,15,680")
         self.assertIn("UNKNOWN_COMMAND", str(cm.exception))
+
+    def test_3col_csv_line_is_bad_in_session(self):
+        """4列必須のプロトコルでは、セッション中の3列行はBAD_CSV_LINEで即座に拒否される。"""
+        self.console.command("MAP BEGIN")
+        with self.assertRaises(mp.MapConsoleError) as cm:
+            self.console.command("400,40,15")
+        self.assertIn("BAD_CSV_LINE", str(cm.exception))
+        self.assertEqual(self.console.dump_map(), list(DEFAULT_MAP))
 
     def test_empty_line_is_refused_by_client(self):
         """空行はファームが応答を返さないので、送る前にクライアント側で弾く。"""
@@ -185,26 +210,31 @@ class TestConsole(ConsoleTestCase):
     def test_non_ascii_is_refused_by_client(self):
         """非ASCIIはファームで化けた1行になるので、送る前に弾く。"""
         with self.assertRaises(mp.MapConsoleError) as cm:
-            self.console.command("MAP SET 2000 40 20 　")
+            self.console.command("MAP SET 2000 40 20 680 　")
         self.assertIn("ASCII", str(cm.exception))
 
     def test_set_entry_updates_existing_row(self):
-        self.console.set_entry(2000, 50, 22)
+        self.console.set_entry(2000, 50, 22, 680)
         rows = self.console.dump_map()
         self.assertEqual(len(rows), 15)               # 行数は変わらない
-        self.assertEqual(rows[4], (2000, 50, 22))
+        self.assertEqual(rows[4], (2000, 50, 22, 680))
 
     def test_set_entry_inserts_when_rpm_absent(self):
         """該当RPMが無いと行が挿入される。GUIが稼働中にRPM列を固定する根拠。"""
-        self.console.set_entry(2200, 50, 22)
+        self.console.set_entry(2200, 50, 22, 680)
         rows = self.console.dump_map()
         self.assertEqual(len(rows), 16)
-        self.assertEqual(rows[5], (2200, 50, 22))
+        self.assertEqual(rows[5], (2200, 50, 22, 680))
         self.assertEqual([r[0] for r in rows], sorted(r[0] for r in rows))
 
     def test_set_entry_rejects_out_of_range(self):
         with self.assertRaises(mp.MapConsoleError) as cm:
-            self.console.set_entry(2000, 40, 91)
+            self.console.set_entry(2000, 40, 91, 680)
+        self.assertIn("SET_REJECTED", str(cm.exception))
+
+    def test_set_entry_rejects_inj_end_ca_out_of_range(self):
+        with self.assertRaises(mp.MapConsoleError) as cm:
+            self.console.set_entry(2000, 40, 20, 721)
         self.assertIn("SET_REJECTED", str(cm.exception))
 
     def test_save_requires_engine_stopped(self):

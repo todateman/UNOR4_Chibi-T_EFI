@@ -29,40 +29,75 @@ const DEFAULT_MAP = readMap('RPM_2026SUZUKA.CSV');
 
 // -----------------------------------------------------------------------------
 test('CRCが実機の既知値と一致する', () => {
-  // 実機の MAP INFO が defaultMap に対して返す値
-  assert.equal(crc16(DEFAULT_MAP), 0x52f4);
+  // 実機の MAP INFO が defaultMap（4列）に対して返す値
+  assert.equal(crc16(DEFAULT_MAP), 0x7418);
 });
 
-test('CRCはMapEntryの6バイト（パディング込み）で計算される', () => {
-  // 5バイトで詰めると別の値になる。順序を入れ替えれば当然変わる。
-  assert.notEqual(crc16([{ rpm: 400, inj: 40, ign: 15 }]),
-                  crc16([{ rpm: 400, inj: 15, ign: 40 }]));
+test('CRCはMapEntryの8バイト（パディング込み）で計算される', () => {
+  // 詰め方を誤ると別の値になる。順序を入れ替えれば当然変わる。
+  assert.notEqual(crc16([{
+    rpm: 400, inj: 40, ign: 15, end: 680,
+  }]), crc16([{
+    rpm: 400, inj: 15, ign: 40, end: 680,
+  }]));
+  assert.notEqual(crc16([{
+    rpm: 400, inj: 40, ign: 15, end: 680,
+  }]), crc16([{
+    rpm: 400, inj: 40, ign: 15, end: 681,
+  }]));
 });
 
 test('検証がファームと同じ判定を返す', () => {
   assert.equal(validate(DEFAULT_MAP), null);
   assert.equal(validate([]), 'NO_ROWS');
-  assert.equal(validate([{ rpm: 0, inj: 40, ign: 15 }]), 'RPM_OUT_OF_RANGE');
-  assert.equal(validate([{ rpm: 20001, inj: 40, ign: 15 }]), 'RPM_OUT_OF_RANGE');
-  assert.equal(validate([{ rpm: 400, inj: 256, ign: 15 }]), 'INJ_OUT_OF_RANGE');
-  assert.equal(validate([{ rpm: 400, inj: 40, ign: 91 }]), 'IGN_CA_OUT_OF_RANGE');
-  assert.equal(validate([{ rpm: 400, inj: 40, ign: 15 }, { rpm: 400, inj: 40, ign: 15 }]),
-               'RPM_NOT_ASCENDING');
-  const many = Array.from({ length: 25 }, (_, i) => ({ rpm: (i + 1) * 10, inj: 40, ign: 15 }));
+  assert.equal(validate([{
+    rpm: 0, inj: 40, ign: 15, end: 680,
+  }]), 'RPM_OUT_OF_RANGE');
+  assert.equal(validate([{
+    rpm: 20001, inj: 40, ign: 15, end: 680,
+  }]), 'RPM_OUT_OF_RANGE');
+  assert.equal(validate([{
+    rpm: 400, inj: 256, ign: 15, end: 680,
+  }]), 'INJ_OUT_OF_RANGE');
+  assert.equal(validate([{
+    rpm: 400, inj: 40, ign: 91, end: 680,
+  }]), 'IGN_CA_OUT_OF_RANGE');
+  assert.equal(validate([{
+    rpm: 400, inj: 40, ign: 15, end: 721,
+  }]), 'INJ_END_CA_OUT_OF_RANGE');
+  assert.equal(validate([
+    {
+      rpm: 400, inj: 40, ign: 15, end: 680,
+    },
+    {
+      rpm: 400, inj: 40, ign: 15, end: 680,
+    },
+  ]), 'RPM_NOT_ASCENDING');
+  const many = Array.from({ length: 25 }, (_, i) => ({
+    rpm: (i + 1) * 10, inj: 40, ign: 15, end: 680,
+  }));
   assert.equal(validate(many), 'TOO_MANY_ROWS');
 });
 
-test('ign_ca>90 の既存3ファイルが弾かれる', () => {
+test('ign_ca>90 の既存3ファイルが弾かれる（3列CSVはparseCsvがエラーにするのでスキップ）', () => {
   for (const name of ['RPM_2025SUZUKA.CSV', 'RPM_2025MOTEGI.csv', 'RPM_2024MOTEGI.CSV']) {
-    assert.equal(validate(readMap(name)), 'IGN_CA_OUT_OF_RANGE', name);
+    const { warnings } = parseCsv(readFileSync(join(REPO, 'microSD', name), 'utf8'));
+    assert.ok(warnings.length > 0, `${name}: 3列CSVは4列目なしでエラーになるはず`);
   }
-  for (const name of ['RPM.CSV', 'RPM_2026SUZUKA.CSV', 'RPM_2024SUZUKA.csv']) {
+  for (const name of ['RPM.CSV', 'RPM_2026SUZUKA.CSV']) {
     assert.equal(validate(readMap(name)), null, name);
   }
 });
 
 test('cellErrors が違反セルを特定する', () => {
-  const rows = [{ rpm: 400, inj: 40, ign: 15 }, { rpm: 300, inj: 40, ign: 200 }];
+  const rows = [
+    {
+      rpm: 400, inj: 40, ign: 15, end: 680,
+    },
+    {
+      rpm: 300, inj: 40, ign: 200, end: 680,
+    },
+  ];
   const bad = cellErrors(rows);
   assert.ok(bad['1:rpm']);
   assert.ok(bad['1:ign']);
@@ -93,14 +128,24 @@ test('diff がブレークポイント一致を判定する', () => {
 
 // -----------------------------------------------------------------------------
 test('トリムがクランプされる', () => {
-  const rows = [{ rpm: 400, inj: 250, ign: 88 }];
+  const rows = [{
+    rpm: 400, inj: 250, ign: 88, end: 700,
+  }];
   assert.equal(trimRatio(rows, [0], 'inj', 0.5)[0].inj, 255);     // 上限255
   assert.equal(trimDelta(rows, [0], 'ign', 10)[0].ign, 90);       // 上限90
   assert.equal(trimDelta(rows, [0], 'inj', -300)[0].inj, 0);      // 下限0
+  assert.equal(trimDelta(rows, [0], 'end', 100)[0].end, 720);     // 上限720
 });
 
 test('トリムは選択行だけを変える', () => {
-  const rows = [{ rpm: 400, inj: 40, ign: 15 }, { rpm: 800, inj: 40, ign: 15 }];
+  const rows = [
+    {
+      rpm: 400, inj: 40, ign: 15, end: 680,
+    },
+    {
+      rpm: 800, inj: 40, ign: 15, end: 680,
+    },
+  ];
   const out = trimDelta(rows, [1], 'inj', 5);
   assert.equal(out[0].inj, 40);
   assert.equal(out[1].inj, 45);
@@ -108,9 +153,15 @@ test('トリムは選択行だけを変える', () => {
 
 test('補間が両端を固定して間を埋める', () => {
   const rows = [
-    { rpm: 1000, inj: 10, ign: 0 },
-    { rpm: 2000, inj: 99, ign: 0 },
-    { rpm: 3000, inj: 30, ign: 0 },
+    {
+      rpm: 1000, inj: 10, ign: 0, end: 680,
+    },
+    {
+      rpm: 2000, inj: 99, ign: 0, end: 680,
+    },
+    {
+      rpm: 3000, inj: 30, ign: 0, end: 680,
+    },
   ];
   const out = interpolate(rows, [0, 1, 2], 'inj');
   assert.equal(out[0].inj, 10);
@@ -120,9 +171,15 @@ test('補間が両端を固定して間を埋める', () => {
 
 test('平滑化が選択範囲の内側だけを動かす', () => {
   const rows = [
-    { rpm: 1000, inj: 40, ign: 0 },
-    { rpm: 2000, inj: 80, ign: 0 },
-    { rpm: 3000, inj: 40, ign: 0 },
+    {
+      rpm: 1000, inj: 40, ign: 0, end: 680,
+    },
+    {
+      rpm: 2000, inj: 80, ign: 0, end: 680,
+    },
+    {
+      rpm: 3000, inj: 40, ign: 0, end: 680,
+    },
   ];
   const out = smooth(rows, [0, 1, 2], 'inj');
   assert.equal(out[0].inj, 40);
@@ -131,21 +188,25 @@ test('平滑化が選択範囲の内側だけを動かす', () => {
 });
 
 test('行の追加と削除', () => {
-  const added = insertRow(DEFAULT_MAP, 2200, 50, 22);
+  const added = insertRow(DEFAULT_MAP, 2200, 50, 22, 680);
   assert.equal(added.length, 16);
   assert.equal(added[5].rpm, 2200);
   assert.deepEqual(added.map((r) => r.rpm), [...added.map((r) => r.rpm)].sort((a, b) => a - b));
 
   // 重複RPMは追加しない
-  assert.equal(insertRow(DEFAULT_MAP, 2000, 50, 22).length, DEFAULT_MAP.length);
+  assert.equal(insertRow(DEFAULT_MAP, 2000, 50, 22, 680).length, DEFAULT_MAP.length);
 
   // 上限を超えて追加しない
-  const full = Array.from({ length: MAP_MAX_ENTRIES }, (_, i) => ({ rpm: (i + 1) * 100, inj: 40, ign: 15 }));
-  assert.equal(insertRow(full, 9999, 40, 15).length, MAP_MAX_ENTRIES);
+  const full = Array.from({ length: MAP_MAX_ENTRIES }, (_, i) => ({
+    rpm: (i + 1) * 100, inj: 40, ign: 15, end: 680,
+  }));
+  assert.equal(insertRow(full, 9999, 40, 15, 680).length, MAP_MAX_ENTRIES);
 
   assert.equal(removeRows(DEFAULT_MAP, [0, 1]).length, 13);
   // 0行にはしない
-  assert.equal(removeRows([{ rpm: 400, inj: 40, ign: 15 }], [0]).length, 1);
+  assert.equal(removeRows([{
+    rpm: 400, inj: 40, ign: 15, end: 680,
+  }], [0]).length, 1);
 });
 
 // -----------------------------------------------------------------------------
@@ -168,8 +229,12 @@ test('リンターが中間行の燃料カットを検出する', () => {
 
 test('リンターが跳びを警告する', () => {
   const rows = [
-    { rpm: 1000, inj: 40, ign: 10 },
-    { rpm: 2000, inj: 100, ign: 30 },
+    {
+      rpm: 1000, inj: 40, ign: 10, end: 680,
+    },
+    {
+      rpm: 2000, inj: 100, ign: 30, end: 680,
+    },
   ];
   const issues = lint(rows);
   assert.ok(issues.some((i) => i.text.includes('噴射時間が前行から')));
@@ -181,13 +246,23 @@ test('CSVの往復で内容が保たれる', () => {
   const { rows, warnings } = parseCsv(readFileSync(join(REPO, 'microSD', 'RPM_2026SUZUKA.CSV'), 'utf8'));
   assert.equal(warnings.length, 0);
   assert.equal(rows.length, 15);
-  assert.deepEqual(rows[0], { rpm: 400, inj: 40, ign: 15 });
+  assert.deepEqual(rows[0], {
+    rpm: 400, inj: 0, ign: 0, end: 0,
+  });
   assert.deepEqual(parseCsv(formatCsv(rows)).rows, rows);
 });
 
+test('3列（旧書式）CSVは4列目が無いのでエラーになる', () => {
+  const { rows, warnings } = parseCsv('RPM, INJ, IGN\n400,40,15\n');
+  assert.equal(rows.length, 0);
+  assert.ok(warnings.length > 0);
+});
+
 test('CSVがBOM・コメント・ヘッダを無視する', () => {
-  const { rows } = parseCsv('﻿RPM, INJ, IGN\n# comment\n;other\n\n400,40,15\n');
-  assert.deepEqual(rows, [{ rpm: 400, inj: 40, ign: 15 }]);
+  const { rows } = parseCsv('﻿RPM, INJ, IGN, INJ_END\n# comment\n;other\n\n400,40,15,680\n');
+  assert.deepEqual(rows, [{
+    rpm: 400, inj: 40, ign: 15, end: 680,
+  }]);
 });
 
 test('テレメトリログCSVの往復', () => {
@@ -265,15 +340,19 @@ test('VER行のパース', () => {
 });
 
 test('MAP?の本文からCSV行を取り出す', () => {
-  const rows = parseDump(['RPM,  INJ(0.1msec), IGN(CA)', '400,40,15', '800,40,15']);
-  assert.deepEqual(rows, [{ rpm: 400, inj: 40, ign: 15 }, { rpm: 800, inj: 40, ign: 15 }]);
+  const rows = parseDump(['RPM,  INJ(0.1msec), IGN(CA), INJ_END(CA)', '400,40,15,680', '800,40,15,680']);
+  assert.deepEqual(rows, [{
+    rpm: 400, inj: 40, ign: 15, end: 680,
+  }, {
+    rpm: 800, inj: 40, ign: 15, end: 680,
+  }]);
 });
 
 test('送ってはいけない行を弾く', () => {
   assert.ok(rejectReason(''));               // 空行は応答が返らない
   assert.ok(rejectReason('   '));
   assert.ok(rejectReason('X'.repeat(100)));  // 96バイト上限
-  assert.ok(rejectReason('MAP SET 2000 40 20 　'));   // 非ASCII
+  assert.ok(rejectReason('MAP SET 2000 40 20 680 　'));   // 非ASCII
   assert.equal(rejectReason('MAP INFO'), null);
 });
 

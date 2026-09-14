@@ -8,21 +8,21 @@
 // 内蔵デフォルトMAP（EEPROM未初期化・破損時のフォールバック）
 //-----------------------------------------------------------------------------
 const MapEntry defaultMap[] = {
-  {400,  40, 15},
-  {800,  40, 15},
-  {1200, 40, 15},
-  {1600, 40, 15},
-  {2000, 44, 20},
-  {2400, 44, 20},
-  {2800, 44, 25},
-  {3200, 42, 25},
-  {3600, 40, 25},
-  {4000, 40, 30},
-  {4400, 40, 30},
-  {4800, 40, 30},
-  {5200, 40, 30},
-  {5600, 40, 30},
-  {6000, 40, 30}
+  {400,  0,  0,  0},    // 400RPM以下はアイドリング不能なのでエンジン停止
+  {800,  80, 0,  20},   // 800RPM以下は始動状態
+  {1200, 80, 0,  20},   // 1200RPM以下は始動状態
+  {1600, 40, 15, 680},  // 以降は通常走行域
+  {2000, 44, 20, 680},
+  {2400, 44, 20, 680},
+  {2800, 44, 25, 680},
+  {3200, 42, 25, 680},
+  {3600, 40, 25, 680},
+  {4000, 40, 30, 680},
+  {4400, 40, 30, 680},
+  {4800, 40, 30, 680},
+  {5200, 40, 30, 680},
+  {5600, 40, 30, 680},
+  {6000, 40, 30, 680}
 };
 const uint8_t defaultMapSize = sizeof(defaultMap) / sizeof(defaultMap[0]);
 
@@ -80,9 +80,10 @@ static MapValidation validateTable(const MapEntry* e, uint8_t count) {
   if (count == 0)               return MAP_ERR_EMPTY;
   if (count > MAP_MAX_ENTRIES)  return MAP_ERR_TOO_MANY;
   for (uint8_t i = 0; i < count; i++) {
-    if (e[i].rpm == 0 || e[i].rpm > MAP_RPM_MAX) return MAP_ERR_RPM_RANGE;
-    if (e[i].ign_ca > MAP_IGN_CA_MAX)            return MAP_ERR_IGN_RANGE;
-    if (i > 0 && e[i].rpm <= e[i - 1].rpm)       return MAP_ERR_RPM_ORDER;
+    if (e[i].rpm == 0 || e[i].rpm > MAP_RPM_MAX)       return MAP_ERR_RPM_RANGE;
+    if (e[i].ign_ca > MAP_IGN_CA_MAX)                  return MAP_ERR_IGN_RANGE;
+    if (e[i].inj_end_ca > MAP_INJ_END_CA_MAX)          return MAP_ERR_INJ_END_CA_RANGE;
+    if (i > 0 && e[i].rpm <= e[i - 1].rpm)             return MAP_ERR_RPM_ORDER;
   }
   return MAP_OK;
 }
@@ -114,11 +115,12 @@ void mapStagingClear() {
   mapStaging.count = 0;
 }
 
-bool mapStagingAppend(uint16_t rpm, uint8_t inj_time, uint16_t ign_ca) {
+bool mapStagingAppend(uint16_t rpm, uint8_t inj_time, uint16_t ign_ca, uint16_t inj_end_ca) {
   if (mapStaging.count >= MAP_MAX_ENTRIES) return false;
-  mapStaging.e[mapStaging.count].rpm      = rpm;
-  mapStaging.e[mapStaging.count].inj_time = inj_time;
-  mapStaging.e[mapStaging.count].ign_ca   = ign_ca;
+  mapStaging.e[mapStaging.count].rpm         = rpm;
+  mapStaging.e[mapStaging.count].inj_time    = inj_time;
+  mapStaging.e[mapStaging.count].ign_ca      = ign_ca;
+  mapStaging.e[mapStaging.count].inj_end_ca  = inj_end_ca;
   mapStaging.count++;
   return true;
 }
@@ -147,9 +149,10 @@ void mapApplyDefault() {
   mapSource = MAP_SRC_DEFAULT;
 }
 
-bool mapSetEntry(uint16_t rpm, uint8_t inj_time, uint16_t ign_ca) {
-  if (rpm == 0 || rpm > MAP_RPM_MAX)  return false;
-  if (ign_ca > MAP_IGN_CA_MAX)        return false;
+bool mapSetEntry(uint16_t rpm, uint8_t inj_time, uint16_t ign_ca, uint16_t inj_end_ca) {
+  if (rpm == 0 || rpm > MAP_RPM_MAX)          return false;
+  if (ign_ca > MAP_IGN_CA_MAX)                return false;
+  if (inj_end_ca > MAP_INJ_END_CA_MAX)        return false;
 
   const MapTable& src = mapGetActive();
   MapTable&       dst = inactiveBank();
@@ -164,17 +167,19 @@ bool mapSetEntry(uint16_t rpm, uint8_t inj_time, uint16_t ign_ca) {
   if (i < src.count && src.e[i].rpm == rpm) {
     // 既存行を更新
     dst.count = src.count;
-    dst.e[i].rpm      = rpm;
-    dst.e[i].inj_time = inj_time;
-    dst.e[i].ign_ca   = ign_ca;
+    dst.e[i].rpm         = rpm;
+    dst.e[i].inj_time    = inj_time;
+    dst.e[i].ign_ca      = ign_ca;
+    dst.e[i].inj_end_ca  = inj_end_ca;
     for (uint8_t j = i + 1; j < src.count; j++) dst.e[j] = src.e[j];
   } else {
     // 新規行として挿入
     if (src.count >= MAP_MAX_ENTRIES) return false;
     dst.count = src.count + 1;
-    dst.e[i].rpm      = rpm;
-    dst.e[i].inj_time = inj_time;
-    dst.e[i].ign_ca   = ign_ca;
+    dst.e[i].rpm         = rpm;
+    dst.e[i].inj_time    = inj_time;
+    dst.e[i].ign_ca      = ign_ca;
+    dst.e[i].inj_end_ca  = inj_end_ca;
     for (uint8_t j = i; j < src.count; j++) dst.e[j + 1] = src.e[j];
   }
 
@@ -263,7 +268,7 @@ MapSaveResult mapSaveToEEPROM() {
 // CSV行パース
 //-----------------------------------------------------------------------------
 bool mapParseCsvLine(const char* line, uint16_t& rpm, uint8_t& inj_time,
-                     uint16_t& ign_ca, bool& skip) {
+                     uint16_t& ign_ca, uint16_t& inj_end_ca, bool& skip) {
   skip = false;
 
   // 先頭の空白を飛ばす
@@ -283,8 +288,8 @@ bool mapParseCsvLine(const char* line, uint16_t& rpm, uint8_t& inj_time,
   }
   if (!isdigit((unsigned char)*p)) return false;
 
-  long v[3];
-  for (uint8_t col = 0; col < 3; col++) {
+  long v[4];
+  for (uint8_t col = 0; col < 4; col++) {
     while (*p == ' ' || *p == '\t') p++;
     if (!isdigit((unsigned char)*p)) return false;  // 桁が足りない/数値でない
 
@@ -297,7 +302,7 @@ bool mapParseCsvLine(const char* line, uint16_t& rpm, uint8_t& inj_time,
     v[col] = val;
 
     while (*p == ' ' || *p == '\t') p++;
-    if (col < 2) {
+    if (col < 3) {
       if (*p != ',') return false;      // 区切り文字が無い
       p++;
     }
@@ -307,22 +312,24 @@ bool mapParseCsvLine(const char* line, uint16_t& rpm, uint8_t& inj_time,
   while (*p == ' ' || *p == '\t' || *p == ',') p++;
   if (*p != '\0') return false;
 
-  if (v[0] > 65535L || v[1] > 255L || v[2] > 65535L) return false;
+  if (v[0] > 65535L || v[1] > 255L || v[2] > 65535L || v[3] > 65535L) return false;
 
-  rpm      = (uint16_t)v[0];
-  inj_time = (uint8_t)v[1];
-  ign_ca   = (uint16_t)v[2];
+  rpm        = (uint16_t)v[0];
+  inj_time   = (uint8_t)v[1];
+  ign_ca     = (uint16_t)v[2];
+  inj_end_ca = (uint16_t)v[3];
   return true;
 }
 
 const char* mapValidationText(MapValidation v) {
   switch (v) {
-    case MAP_OK:             return "OK";
-    case MAP_ERR_EMPTY:      return "NO_ROWS";
-    case MAP_ERR_TOO_MANY:   return "TOO_MANY_ROWS";
-    case MAP_ERR_RPM_ORDER:  return "RPM_NOT_ASCENDING";
-    case MAP_ERR_RPM_RANGE:  return "RPM_OUT_OF_RANGE";
-    case MAP_ERR_IGN_RANGE:  return "IGN_CA_OUT_OF_RANGE";
-    default:                 return "UNKNOWN";
+    case MAP_OK:                    return "OK";
+    case MAP_ERR_EMPTY:             return "NO_ROWS";
+    case MAP_ERR_TOO_MANY:          return "TOO_MANY_ROWS";
+    case MAP_ERR_RPM_ORDER:         return "RPM_NOT_ASCENDING";
+    case MAP_ERR_RPM_RANGE:         return "RPM_OUT_OF_RANGE";
+    case MAP_ERR_IGN_RANGE:         return "IGN_CA_OUT_OF_RANGE";
+    case MAP_ERR_INJ_END_CA_RANGE:  return "INJ_END_CA_OUT_OF_RANGE";
+    default:                        return "UNKNOWN";
   }
 }

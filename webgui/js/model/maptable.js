@@ -1,7 +1,8 @@
 // MAPテーブルの検証・CRC・編集操作。
 //
-// 行は { rpm, inj, ign } で、inj はファームと同じ x0.1ms の整数のまま保持する
+// 行は { rpm, inj, ign, end } で、inj はファームと同じ x0.1ms の整数のまま保持する
 // （表示のときだけ /10 する）。丸め誤差の混入源を1箇所に閉じ込めるため。
+// end は噴射終了角度(inj_end_ca、CA)。
 //
 // 検証規則は src/map_store.cpp の validateTable() と一致させること。
 
@@ -9,6 +10,7 @@ export const MAP_MAX_ENTRIES = 24;
 export const MAP_RPM_MAX = 20000;
 export const MAP_INJ_MAX = 255;
 export const MAP_IGN_CA_MAX = 90;
+export const MAP_INJ_END_CA_MAX = 720;
 
 // src/main.cpp のレブリミット。MAP最終行がこれを下回ると、
 // レブリミットより手前で噴射・点火が止まる（mapOutOfRange）。
@@ -21,6 +23,7 @@ export const ERROR_TEXT = {
   RPM_OUT_OF_RANGE: `RPMが範囲外です(1〜${MAP_RPM_MAX})`,
   IGN_CA_OUT_OF_RANGE: `点火進角が範囲外です(0〜${MAP_IGN_CA_MAX} CA)`,
   INJ_OUT_OF_RANGE: `噴射時間が範囲外です(0〜${MAP_INJ_MAX} = 0〜25.5ms)`,
+  INJ_END_CA_OUT_OF_RANGE: `噴射終了角度が範囲外です(0〜${MAP_INJ_END_CA_MAX} CA)`,
 };
 
 export const clone = (rows) => rows.map((r) => ({ ...r }));
@@ -34,6 +37,7 @@ export function validate(rows) {
     if (!(r.rpm >= 1 && r.rpm <= MAP_RPM_MAX)) return 'RPM_OUT_OF_RANGE';
     if (!(r.inj >= 0 && r.inj <= MAP_INJ_MAX)) return 'INJ_OUT_OF_RANGE';
     if (!(r.ign >= 0 && r.ign <= MAP_IGN_CA_MAX)) return 'IGN_CA_OUT_OF_RANGE';
+    if (!(r.end >= 0 && r.end <= MAP_INJ_END_CA_MAX)) return 'INJ_END_CA_OUT_OF_RANGE';
     if (prev !== null && r.rpm <= prev) return 'RPM_NOT_ASCENDING';
     prev = r.rpm;
   }
@@ -49,6 +53,9 @@ export function cellErrors(rows) {
     else if (prev !== null && r.rpm <= prev) bad[`${i}:rpm`] = ERROR_TEXT.RPM_NOT_ASCENDING;
     if (!(r.inj >= 0 && r.inj <= MAP_INJ_MAX)) bad[`${i}:inj`] = ERROR_TEXT.INJ_OUT_OF_RANGE;
     if (!(r.ign >= 0 && r.ign <= MAP_IGN_CA_MAX)) bad[`${i}:ign`] = ERROR_TEXT.IGN_CA_OUT_OF_RANGE;
+    if (!(r.end >= 0 && r.end <= MAP_INJ_END_CA_MAX)) {
+      bad[`${i}:end`] = ERROR_TEXT.INJ_END_CA_OUT_OF_RANGE;
+    }
     prev = r.rpm;
   });
   return bad;
@@ -58,18 +65,19 @@ export function cellErrors(rows) {
  * MAPのCRC。MAP INFO の crc= と突き合わせて転送を検証する。
  *
  * CRC-16/CCITT-FALSE を MapEntry の生バイト列に対して計算する。
- * MapEntry は { uint16 rpm; uint8 inj; (padding 1); uint16 ign; } の6バイトで、
- * ファームは sizeof(MapEntry)*count バイトを対象にするため、
+ * MapEntry は { uint16 rpm; uint8 inj; (padding 1); uint16 ign; uint16 end; }
+ * の8バイトで、ファームは sizeof(MapEntry)*count バイトを対象にするため、
  * パディングの1バイト(常に0)も含めて詰める必要がある。
  */
 export function crc16(rows) {
-  const buf = new Uint8Array(rows.length * 6);
+  const buf = new Uint8Array(rows.length * 8);
   const view = new DataView(buf.buffer);
   rows.forEach((r, i) => {
-    view.setUint16(i * 6, r.rpm, true);      // little-endian
-    view.setUint8(i * 6 + 2, r.inj);
-    // i*6+3 はパディング（0のまま）
-    view.setUint16(i * 6 + 4, r.ign, true);
+    view.setUint16(i * 8, r.rpm, true);      // little-endian
+    view.setUint8(i * 8 + 2, r.inj);
+    // i*8+3 はパディング（0のまま）
+    view.setUint16(i * 8 + 4, r.ign, true);
+    view.setUint16(i * 8 + 6, r.end, true);
   });
   let crc = 0xffff;
   for (const byte of buf) {
@@ -109,6 +117,7 @@ export function diff(deviceRows, editRows) {
       let dirty = false;
       if (d.inj !== r.inj) { cells[`${i}:inj`] = r.inj - d.inj; dirty = true; }
       if (d.ign !== r.ign) { cells[`${i}:ign`] = r.ign - d.ign; dirty = true; }
+      if (d.end !== r.end) { cells[`${i}:end`] = r.end - d.end; dirty = true; }
       if (dirty) changedRows.push(i);
     });
   }
@@ -125,11 +134,15 @@ export function diff(deviceRows, editRows) {
 // -----------------------------------------------------------------------------
 const clampInj = (v) => Math.max(0, Math.min(MAP_INJ_MAX, Math.round(v)));
 const clampIgn = (v) => Math.max(0, Math.min(MAP_IGN_CA_MAX, Math.round(v)));
+const clampEnd = (v) => Math.max(0, Math.min(MAP_INJ_END_CA_MAX, Math.round(v)));
 const clampRpm = (v) => Math.max(1, Math.min(MAP_RPM_MAX, Math.round(v)));
 
-export const clampField = (field, v) => (
-  field === 'inj' ? clampInj(v) : field === 'ign' ? clampIgn(v) : clampRpm(v)
-);
+export const clampField = (field, v) => {
+  if (field === 'inj') return clampInj(v);
+  if (field === 'ign') return clampIgn(v);
+  if (field === 'end') return clampEnd(v);
+  return clampRpm(v);
+};
 
 /** 選択行の値を割合で増減する（例: +5% なら ratio=0.05）。 */
 export function trimRatio(rows, indices, field, ratio) {
@@ -178,10 +191,12 @@ export function smooth(rows, indices, field) {
 }
 
 /** 行を追加する。RPMの昇順を保つ位置へ挿入する。 */
-export function insertRow(rows, rpm, inj, ign) {
+export function insertRow(rows, rpm, inj, ign, end) {
   if (rows.length >= MAP_MAX_ENTRIES) return rows;
   if (rows.some((r) => r.rpm === rpm)) return rows;
-  const next = [...rows, { rpm: clampRpm(rpm), inj: clampInj(inj), ign: clampIgn(ign) }];
+  const next = [...rows, {
+    rpm: clampRpm(rpm), inj: clampInj(inj), ign: clampIgn(ign), end: clampEnd(end),
+  }];
   next.sort((a, b) => a.rpm - b.rpm);
   return next;
 }

@@ -8,7 +8,7 @@
 
 import { MAP_MAX_ENTRIES, cellErrors, clampField } from '../model/maptable.js';
 
-const FIELDS = ['rpm', 'inj', 'ign'];
+const FIELDS = ['rpm', 'inj', 'ign', 'end'];
 
 export class MapTableView {
   /**
@@ -72,6 +72,7 @@ export class MapTableView {
         <span class="c-num">RPM</span>
         <span class="c-num">噴射 ms</span>
         <span class="c-num">進角 CA</span>
+        <span class="c-num">噴射終了 CA</span>
         <span class="c-diff">差分</span>
       </div>`;
 
@@ -96,9 +97,11 @@ export class MapTableView {
 
       const dInj = diff.cells[`${i}:inj`];
       const dIgn = diff.cells[`${i}:ign`];
+      const dEnd = diff.cells[`${i}:end`];
       const parts = [];
       if (dInj) parts.push(`<b class="${dInj > 0 ? 'up' : 'down'}">噴射 ${dInj > 0 ? '+' : ''}${(dInj / 10).toFixed(1)}</b>`);
       if (dIgn) parts.push(`<b class="${dIgn > 0 ? 'up' : 'down'}">進角 ${dIgn > 0 ? '+' : ''}${dIgn}</b>`);
+      if (dEnd) parts.push(`<b class="${dEnd > 0 ? 'up' : 'down'}">終了 ${dEnd > 0 ? '+' : ''}${dEnd}</b>`);
       const diffText = diff.breakpointsMatch
         ? (parts.join(' ') || '<span class="dim">·</span>')
         : '<span class="dim">—</span>';
@@ -109,6 +112,7 @@ export class MapTableView {
           ${cell('rpm', r.rpm)}
           ${cell('inj', (r.inj / 10).toFixed(1))}
           ${cell('ign', r.ign)}
+          ${cell('end', r.end)}
           <span class="c-diff">${diffText}</span>
         </div>`;
     }).join('');

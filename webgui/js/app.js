@@ -21,6 +21,7 @@ const $ = (sel) => document.querySelector(sel);
 const LIVE_ARM_MS = 60000;
 const LIVE_MAX_INJ_STEP = 10;   // x0.1ms = 1.0ms
 const LIVE_MAX_IGN_STEP = 5;    // CA
+const LIVE_MAX_END_STEP = 30;   // CA
 
 const state = {
   transport: null,
@@ -245,7 +246,7 @@ async function uploadFull() {
     try {
       for (const r of state.rows) {
         // eslint-disable-next-line no-await-in-loop
-        await tp.command(`${r.rpm},${r.inj},${r.ign}`);
+        await tp.command(`${r.rpm},${r.inj},${r.ign},${r.end}`);
       }
       const end = await tp.command('MAP END');
       say(`転送しました: ${end.code}`, 'ok');
@@ -274,7 +275,7 @@ async function pushDelta() {
     for (const i of s.diff.changedRows) {
       const r = state.rows[i];
       // eslint-disable-next-line no-await-in-loop
-      await state.transport.command(`MAP SET ${r.rpm} ${r.inj} ${r.ign}`);
+      await state.transport.command(`MAP SET ${r.rpm} ${r.inj} ${r.ign} ${r.end}`);
     }
     say(`${s.diff.changedRows.length} 行をライブ反映しました`, 'ok');
     await verifyCrc();
@@ -406,10 +407,12 @@ async function maybeLiveApply() {
 
       const tooBig = d.changedRows.find((i) => (
         Math.abs(state.rows[i].inj - state.deviceRows[i].inj) > LIVE_MAX_INJ_STEP
-        || Math.abs(state.rows[i].ign - state.deviceRows[i].ign) > LIVE_MAX_IGN_STEP));
+        || Math.abs(state.rows[i].ign - state.deviceRows[i].ign) > LIVE_MAX_IGN_STEP
+        || Math.abs(state.rows[i].end - state.deviceRows[i].end) > LIVE_MAX_END_STEP));
       if (tooBig !== undefined) {
         say(`${state.rows[tooBig].rpm} rpm の変化量が大きすぎます`
-          + `（1回のライブ反映は噴射 ±${LIVE_MAX_INJ_STEP / 10}ms / 進角 ±${LIVE_MAX_IGN_STEP}CA まで）。`
+          + `（1回のライブ反映は噴射 ±${LIVE_MAX_INJ_STEP / 10}ms / 進角 ±${LIVE_MAX_IGN_STEP}CA / `
+          + `噴射終了 ±${LIVE_MAX_END_STEP}CA まで）。`
           + '「変更を送信」から明示的に反映してください。', 'warn');
         return;
       }
@@ -418,7 +421,7 @@ async function maybeLiveApply() {
         const r = state.rows[i];
         try {
           // eslint-disable-next-line no-await-in-loop
-          await state.transport.command(`MAP SET ${r.rpm} ${r.inj} ${r.ign}`);
+          await state.transport.command(`MAP SET ${r.rpm} ${r.inj} ${r.ign} ${r.end}`);
           state.deviceRows[i] = { ...r };    // OK SET が返った行だけ反映済みとする
         } catch (e) {
           say(`ライブ反映に失敗しました（${r.rpm} rpm）: ${e.message}`, 'error');

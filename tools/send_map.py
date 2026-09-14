@@ -2,7 +2,8 @@
 """ビルドせずにエンジンMAPを書き換えるための転送スクリプト。
 
 USBシリアル(CDC)経由で ECU の MAP コンソールに CSV を流し込む。
-CSV は microSD/RPM_*.CSV と同じ書式（rpm, inj_time(x0.1msec), ign_ca）。
+CSV は microSD/RPM_*.CSV と同じ書式（rpm, inj_time(x0.1msec), ign_ca, inj_end_ca）。
+3列（旧書式）のCSVは既定では拒否される。--legacy-inj-end-ca で4列目を補える。
 
 プロトコルの実装は tools/map_protocol.py にあり、Web GUI（tools/map_gui.py）と
 共有している。
@@ -25,6 +26,9 @@ CSV は microSD/RPM_*.CSV と同じ書式（rpm, inj_time(x0.1msec), ign_ca）�
 
     # 実機なしで動作確認する（モックECU）
     python tools/send_map.py microSD/RPM_2026SUZUKA.CSV --fake
+
+    # 3列（旧書式）CSVを送る場合は噴射終了角度を明示的に補う
+    python tools/send_map.py microSD/RPM_2024MOTEGI.CSV --legacy-inj-end-ca 680
 """
 
 import argparse
@@ -75,6 +79,8 @@ def main() -> int:
                     help="MAPの出所・行数・CRC・EEPROM状態を表示する")
     ap.add_argument("--fake", action="store_true",
                     help="実機の代わりにモックECUへ繋ぐ（動作確認用）")
+    ap.add_argument("--legacy-inj-end-ca", type=int, metavar="CA",
+                    help="3列（旧書式）CSVの噴射終了角度(inj_end_ca)を明示的に補う")
     args = ap.parse_args()
 
     if not args.dump and not args.info and not args.csv:
@@ -82,7 +88,8 @@ def main() -> int:
 
     closer = None
     try:
-        rows = mp.read_csv_rows(args.csv) if args.csv else None
+        rows = (mp.read_csv_rows(args.csv, legacy_inj_end_ca=args.legacy_inj_end_ca)
+                 if args.csv else None)
         if rows is not None:
             # ファームと同じ規則で先に検証しておき、途中で弾かれるのを避ける
             err = mp.validate(rows)

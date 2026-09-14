@@ -42,13 +42,18 @@ SAVE_RETRY_WAIT = 0.4
 # Arduino UNO R4 Minima (Renesas RA4M1) の VID
 ARDUINO_VIDS = (0x2341, 0x2A03)
 
+# このPCツールが前提とするプロトコル版数（src/map_console.cpp の PROTO_VERSION と一致）。
+# proto=2以下のファームはMAPが3列（rpm,inj,ign）のままで、inj_end_ca非対応。
+PROTO_VERSION = 3
+
 # MAP検証レンジ（src/map_store.h と一致させること）
 MAP_MAX_ENTRIES = 24
 MAP_RPM_MAX = 20000
 MAP_INJ_MAX = 255
 MAP_IGN_CA_MAX = 90
+MAP_INJ_END_CA_MAX = 720
 
-CSV_HEADER = "RPM,  INJ(0.1msec), IGN(CA)"
+CSV_HEADER = "RPM,  INJ(0.1msec), IGN(CA), INJ_END(CA)"
 
 
 class MapConsoleError(RuntimeError):
@@ -146,7 +151,7 @@ def parse_telemetry(text: str) -> Optional[Telemetry]:
 # -----------------------------------------------------------------------------
 # MAPテーブル
 # -----------------------------------------------------------------------------
-Row = tuple  # (rpm, inj, ign)
+Row = tuple  # (rpm, inj, ign, inj_end_ca)
 
 
 def validate(rows: Sequence[Row]) -> Optional[str]:
@@ -159,13 +164,15 @@ def validate(rows: Sequence[Row]) -> Optional[str]:
     if len(rows) > MAP_MAX_ENTRIES:
         return "TOO_MANY_ROWS"
     prev = None
-    for rpm, inj, ign in rows:
+    for rpm, inj, ign, inj_end_ca in rows:
         if rpm < 1 or rpm > MAP_RPM_MAX:
             return "RPM_OUT_OF_RANGE"
         if not 0 <= inj <= MAP_INJ_MAX:
             return "INJ_OUT_OF_RANGE"
         if not 0 <= ign <= MAP_IGN_CA_MAX:
             return "IGN_CA_OUT_OF_RANGE"
+        if not 0 <= inj_end_ca <= MAP_INJ_END_CA_MAX:
+            return "INJ_END_CA_OUT_OF_RANGE"
         if prev is not None and rpm <= prev:
             return "RPM_NOT_ASCENDING"
         prev = rpm
@@ -176,11 +183,12 @@ def crc16(rows: Sequence[Row]) -> int:
     """MAPのCRC。MAP INFO の crc= と突き合わせて転送を検証するために使う。
 
     CRC-16/CCITT-FALSE を MapEntry の生バイト列に対して計算する。
-    MapEntry は { uint16 rpm; uint8 inj; (padding 1); uint16 ign; } の6バイトで、
-    ファーム側は sizeof(MapEntry)*count バイトを対象にするため、
+    MapEntry は { uint16 rpm; uint8 inj; (padding 1); uint16 ign; uint16 inj_end_ca; }
+    の8バイトで、ファーム側は sizeof(MapEntry)*count バイトを対象にするため、
     パディングの1バイト(常に0)も含めて詰める必要がある。
     """
-    data = b"".join(struct.pack("<HBxH", rpm, inj, ign) for rpm, inj, ign in rows)
+    data = b"".join(struct.pack("<HBxHH", rpm, inj, ign, inj_end_ca)
+                     for rpm, inj, ign, inj_end_ca in rows)
     crc = 0xFFFF
     for byte in data:
         crc ^= byte << 8
@@ -189,8 +197,13 @@ def crc16(rows: Sequence[Row]) -> int:
     return crc
 
 
-def read_csv_rows(path: str) -> list:
-    """CSVファイルから (rpm, inj, ign) のリストを読む。ヘッダ・空行・#行は無視。"""
+def read_csv_rows(path: str, legacy_inj_end_ca: Optional[int] = None) -> list:
+    """CSVファイルから (rpm, inj, ign, inj_end_ca) のリストを読む。ヘッダ・空行・#行は無視。
+
+    4列必須。3列（旧書式）の行は、legacy_inj_end_ca が指定されていればその値を
+    inj_end_ca として補う。未指定ならエラーにする（噴射終了角度の無断補完は
+    失火・過剰噴射のリスクがあるため、サイレントに埋めない）。
+    """
     rows = []
     with open(path, "r", encoding="utf-8-sig") as f:
         for lineno, raw in enumerate(f, 1):
@@ -203,9 +216,17 @@ def read_csv_rows(path: str) -> list:
             if len(parts) < 3:
                 raise MapConsoleError(f"{path}:{lineno} 列が足りません: {line}")
             try:
-                rows.append((int(parts[0]), int(parts[1]), int(parts[2])))
+                values = [int(p) for p in parts[:4]]
             except ValueError:
                 raise MapConsoleError(f"{path}:{lineno} 数値ではありません: {line}")
+            if len(values) < 4:
+                if legacy_inj_end_ca is None:
+                    raise MapConsoleError(
+                        f"{path}:{lineno} 4列目(INJ_END_CA)がありません: {line}\n"
+                        "  4列のCSV（RPM.CSV等と同じ書式）に更新するか、"
+                        "--legacy-inj-end-ca <値> で補う値を指定してください。")
+                values.append(legacy_inj_end_ca)
+            rows.append(tuple(values[:4]))
     if not rows:
         raise MapConsoleError(f"{path} に有効な行がありません")
     return rows
@@ -214,7 +235,7 @@ def read_csv_rows(path: str) -> list:
 def format_csv(rows: Sequence[Row]) -> str:
     """microSD/RPM_*.CSV と同じ書式で書き出す。"""
     lines = [CSV_HEADER]
-    lines += [f"{rpm},{inj},{ign}" for rpm, inj, ign in rows]
+    lines += [f"{rpm},{inj},{ign},{inj_end_ca}" for rpm, inj, ign, inj_end_ca in rows]
     return "\n".join(lines) + "\n"
 
 
@@ -427,25 +448,25 @@ class MapConsole:
         return out
 
     def dump_map(self) -> list:
-        """現在のMAPを (rpm, inj, ign) のリストとして取得する。"""
+        """現在のMAPを (rpm, inj, ign, inj_end_ca) のリストとして取得する。"""
         res = self.command("MAP?")
         rows = []
         for line in res.body:
             if not line or not line[0].isdigit():
                 continue   # ヘッダ行
             parts = [c.strip() for c in line.split(",")]
-            if len(parts) < 3:
+            if len(parts) < 4:
                 continue
-            rows.append((int(parts[0]), int(parts[1]), int(parts[2])))
+            rows.append((int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])))
         return rows
 
-    def set_entry(self, rpm: int, inj: int, ign: int) -> Response:
+    def set_entry(self, rpm: int, inj: int, ign: int, inj_end_ca: int) -> Response:
         """1行だけライブ変更する。セッション不要なのでテレメトリが途切れない。
 
         注意: 該当RPMの行が無い場合は昇順を保つ位置へ「挿入」される。
         稼働中に意図せず行が増えないよう、呼び出し側でRPMの一致を確認すること。
         """
-        return self.command(f"MAP SET {rpm} {inj} {ign}")
+        return self.command(f"MAP SET {rpm} {inj} {ign} {inj_end_ca}")
 
     def telemetry(self, on: bool, period_ms: int = 100) -> Response:
         return self.command(f"TELEM ON {period_ms}" if on else "TELEM OFF")
@@ -481,8 +502,8 @@ class MapConsole:
 
         self.command("MAP BEGIN")
         try:
-            for rpm, inj, ign in rows:
-                self.command(f"{rpm},{inj},{ign}")
+            for rpm, inj, ign, inj_end_ca in rows:
+                self.command(f"{rpm},{inj},{ign},{inj_end_ca}")
             self.command("MAP END")
         except MapConsoleError:
             try:

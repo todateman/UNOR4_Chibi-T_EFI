@@ -36,13 +36,11 @@ PlatformIO 環境: [platformio.ini](platformio.ini)
 | --- | ------ | ---- |
 | `uno_r4_minima` | Arduino UNO R4 Minima | デフォルト |
 | `rmc_ra4m1_20` | カスタム RA4M1 (`-D rmc_ra4m1_20`) | SD動作分岐あり |
-| `uno_r3` | ATmega328P | 高速GPIO分岐あり |
 
 ビルド例:
 
 ```sh
 pio run -e uno_r4_minima
-pio run -e uno_r3
 pio run -t upload
 pio device monitor -b 115200
 ```
@@ -55,10 +53,10 @@ pio device monitor -b 115200
 | PERIMETER_MM | 1548 | タイヤ周長(mm) |
 | TACHO_RPM_MAX | 6000 | レブリミット <BR> （回転数上限保護） |
 | Dwell_Time_US | 5000 | ドゥエル時間（us） <BR> IGコイルへの充電時間 |
-| start_INJ_time | 80 | 始動時の燃料噴射時間（x0.1ms） |
-| start_IGN_CA | 0 | 始動時の点火進角（CA） |
-| start_INJ_END_CA | 20 | 始動時の燃料噴射終了タイミング角度（CA） |
-| INJ_END_CA | 680 | 通常時の燃料噴射終了タイミング角度（CA） |
+
+始動時・通常時で切り替わる専用定数（`start_INJ_time` 等）は無い。  
+燃料噴射量・点火進角・燃料噴射終了タイミングは全て単一の MAP テーブルから rpm に応じて読み出され、ビルドし直さずに USB シリアルから調整できる。  
+（[MAP](#map) 節参照）
 
 ## ピン割り当て
 
@@ -102,7 +100,7 @@ LOW アクティブ出力注意 (INJ/IGN/STR/DISRESET)。
    - スタート/キル状態評価
    - カム同期タイムアウト→`cycleReset`
    - マップ更新: [`updateEngineMap`](src/main.cpp)
-   - 噴射開始条件 (角度 >= `INJ_STR_CA`、始動時 `start_INJ_END_CA`・通常時 `INJ_END_CA` と噴射時間から逆算、0CA跨ぎ対応)
+   - 噴射開始条件 (角度 >= `INJ_STR_CA`、MAP行の `inj_end_ca` と噴射時間から逆算、0CA跨ぎ対応)
    - 360CA通過時に噴射継続中なら強制OFF（安全リセット）
    - 噴射時間経過で OFF & 燃料量積算
    - 点火進角計算 & 保持時間後 OFF
@@ -113,13 +111,13 @@ LOW アクティブ出力注意 (INJ/IGN/STR/DISRESET)。
 
 ## 燃料噴射計算
 
-噴射終了角度: 始動時（`startState == LOW`）は `start_INJ_END_CA`、通常時は `INJ_END_CA`  
+噴射終了角度: `calculatedINJ_END_CA`（MAPの該当行の `inj_end_ca` 列をそのまま採用。  
+始動時・通常時で切り替える専用ロジックは無く、rpmに応じたMAP行選択（[MAP](#map) 節）に一本化されている）  
 
 噴射開始角度: `INJ_STR_CA`（毎サイクルリセット時に逆算）  
 
 ```text
-inj_end_ca = (startState == LOW) ? start_INJ_END_CA : INJ_END_CA
-INJ_STR_CA = inj_end_ca - (calculatedINJ_time * 100[µs] * 360[deg]) / tachoWidth[µs]
+INJ_STR_CA = calculatedINJ_END_CA - (calculatedINJ_time * 100[µs] * 360[deg]) / tachoWidth[µs]
 // INJ_STR_CA < 0 の場合（0CA跨ぎ）: INJ_STR_CA += 720
 ```
 
@@ -155,11 +153,24 @@ MAP は RAM 上のダブルバンク（[src/map_store.cpp](src/map_store.cpp)）
 
 - 参照ロジック: RPM 昇順テーブルの、最初に `tachoRpm < rpm` となるエントリを採用（階段状）。
 - 行数は可変（最大 24 行）。
-- 列順（CSV / SD 読込も同一）:
+- 列順（CSV / SD 読込も同一。**4列必須**）:
 
   ```text
-  rpm,inj_time(x0.1msec),ign_ca(deg)
+  rpm,inj_time(x0.1msec),ign_ca(deg),inj_end_ca(deg)
   ```
+
+  - `inj_end_ca`（噴射終了タイミング角度、0〜720CA）は、スタートボタン押下直後を含む全rpm帯で共通のMAP行から読み出される。  
+    始動時専用のハードコード定数は無い。
+  - 3列（旧書式）のCSVはエラーになる。  
+    `tools/send_map.py --legacy-inj-end-ca <値>` で噴射終了角度を明示的に補って送ること（無断補完はしない）。
+- 内蔵 `defaultMap`（[src/map_store.cpp](src/map_store.cpp)）は、400/800/1200/1600rpm をブレークポイントに以下のように構成されている:
+
+  | RPM未満 | inj_time | ign_ca | inj_end_ca | 意味 |
+  | --- | --- | --- | --- | --- |
+  | 400 | 0 | 0 | 0 | 400rpm以下はアイドリング不能なのでエンジン停止相当 |
+  | 800 | 80 | 0 | 20 | 800rpm以下は始動状態 |
+  | 1200 | 80 | 0 | 20 | 1200rpm以下は始動状態 |
+  | 1600〜 | 可変 | 可変 | 680 | 通常走行域 |
 
 - 起動時の優先順位: **EEPROM に有効な MAP があればそれを採用**、無ければ内蔵 `defaultMap` へフォールバック。  
   起動時に `MAP SOURCE: EEPROM (15 rows)` のようにどちらを使ったか出力する。
@@ -251,6 +262,9 @@ python tools/send_map.py map.csv --port /dev/cu.usbmodem1101
 
 # 実機なしで動作確認（モックECU）
 python tools/send_map.py microSD/RPM_2026SUZUKA.CSV --fake
+
+# 3列（旧書式）CSVを送る場合は噴射終了角度を明示的に補う
+python tools/send_map.py microSD/RPM_2024MOTEGI.CSV --legacy-inj-end-ca 680
 ```
 
 送信前にファームと同じ規則で検証し、通らない CSV は実機に触れる前に弾く。  
@@ -263,13 +277,13 @@ python tools/send_map.py microSD/RPM_2026SUZUKA.CSV --fake
 
 | コマンド | 動作 | 稼働中 |
 | --- | --- | --- |
-| `MAP?` | 現在の MAP を CSV で出力 | 可 |
+| `MAP?` | 現在の MAP を CSV で出力（4列） | 可 |
 | `MAP INFO` | 出所 / 行数 / CRC / EEPROM 状態 / RPM / ENG を表示 | 可 |
 | `MAP BEGIN` | 転送セッション開始<BR>（USB テレメトリを一時停止） | 可 |
-| `<rpm>,<inj>,<ign>` | セッション中の 1 行<BR>（`RPM` で始まるヘッダ行は自動スキップ） | 可 |
+| `<rpm>,<inj>,<ign>,<inj_end_ca>` | セッション中の 1 行<BR>（`RPM` で始まるヘッダ行は自動スキップ。4列必須） | 可 |
 | `MAP END` | 検証して原子的に反映。失敗時は破棄され現在の MAP は無傷 | 可 |
 | `MAP ABORT` | セッション破棄 | 可 |
-| `MAP SET <rpm> <inj> <ign>` | 1 行だけライブ変更<BR>（該当 RPM が無ければ昇順を保って挿入） | 可 |
+| `MAP SET <rpm> <inj> <ign> <inj_end_ca>` | 1 行だけライブ変更<BR>（該当 RPM が無ければ昇順を保って挿入） | 可 |
 | `MAP SAVE` | EEPROM へ保存<BR>（既存内容と同一なら書き込まず `OK UNCHANGED`） | **不可** |
 | `MAP LOAD` | EEPROM から読み直して RAM へ反映 | 可 |
 | `MAP DEFAULT` | 内蔵 `defaultMap` へ戻す<BR>（EEPROM は変更しない） | 可 |
@@ -312,7 +326,7 @@ T\t<seq>\t<ms>\t<rpm>\t<inj01>\t<ign>\t<spd01>\t<ne>\t<row>\t<flags>
   単位換算は PC 側の責務。
 - `row` をファームから出しているのは、GUI が「実機が実際に採用した行」を推測せずに
   表示できるようにするため。  
-  クランキング中（`startState == LOW`）は MAP を使わず `start_INJ_time` 固定なので、PC 側の推測は必ずズレる。
+  クランキング中（`startState == LOW`）も rpm に応じた同じ MAP テーブルを参照するが、始動直後は rpm の変動が大きく PC 側の推測は容易にズレるため、ファーム自身が報告する `row` を信用する設計にしてある。
 - USB CDC の `write()` はホストが接続したまま読まないと FIFO が空くまで無限にスピンする。  
   `usbLock` を握ったままそうなるとコンソールが応答しなくなるため、 `Serial.availableForWrite()` で空きを確認してから書き、足りなければそのサンプルを捨てる。  
   （落ちた分は `seq` の飛びで GUI が検出できる）
@@ -325,6 +339,7 @@ T\t<seq>\t<ms>\t<rpm>\t<inj01>\t<ign>\t<spd01>\t<ne>\t<row>\t<flags>
 - RPM が厳密昇順、かつ 1〜20000
 - `inj_time` 0〜255（x0.1ms → 最大 25.5ms）
 - `ign_ca` 0〜90（CA）
+- `inj_end_ca` 0〜720（CA。クランク角のフルサイクル、0CA跨ぎ対応と整合）
 
 ### EEPROM（データフラッシュ）
 
@@ -396,7 +411,7 @@ Ardu-Stim で回転信号を与えるか、実際にクランキングした状�
 
 - [x] `MAP SAVE` → `ERR ENGINE_RUNNING` が返る
 - [x] 拒否後に電源を落として再起動しても、EEPROM の内容が変わっていない
-- [x] `MAP SET 3200 45 26` → `OK SET` が返り、`MAP?` に即反映される
+- [x] `MAP SET 3200 45 26 680` → `OK SET` が返り、`MAP?` に即反映される
 - [x] `MAP BEGIN` 〜 `MAP END` の一括転送が稼働中でも通り、反映される
 - [x] `MAP SET` / `MAP END` の実行前後で**エンジンが失火・ストールしない** ← 最重要
 
@@ -502,7 +517,6 @@ java -jar "$env:USERPROFILE\.vscode\extensions\jebbs.plantuml-2.18.1\plantuml.ja
 | ------ | --- |
 | `uno_r4_minima` | 自動 (PlatformIO env) |
 | `rmc_ra4m1_20` | SD 初期化ブロック有効 |
-| `uno_r3` | AVR 高速 I/O 経路使用 |
 
 ## デバッグ
 

@@ -160,7 +160,7 @@ canvas { width: 100%; flex: 1; min-height: 190px; touch-action: none; }
 }
 .tr {
   display: grid;
-  grid-template-columns: 30px 1fr 1fr 1fr 1.5fr;
+  grid-template-columns: 30px 1fr 1fr 1fr 1fr 1.5fr;
   align-items: center;
   gap: 2px;
   padding: 1px 6px;

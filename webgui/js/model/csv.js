@@ -2,8 +2,10 @@
 //
 // 読み取り規則は tools/send_map.py / src/map_store.cpp と揃える:
 //   空行・"#"/";" 始まり・数字で始まらない行（ヘッダ）は無視する。
+// 4列必須（rpm, inj, ign, inj_end_ca）。3列の旧書式CSVはエラーにする
+// （噴射終了角度の無断補完は失火・過剰噴射のリスクがあるため）。
 
-export const CSV_HEADER = 'RPM,  INJ(0.1msec), IGN(CA)';
+export const CSV_HEADER = 'RPM,  INJ(0.1msec), IGN(CA), INJ_END(CA)';
 
 export function parseCsv(text) {
   const rows = [];
@@ -14,23 +16,25 @@ export function parseCsv(text) {
     if (!line || line[0] === '#' || line[0] === ';') return;
     if (!/^\d/.test(line)) return;   // ヘッダ行
     const parts = line.split(',').map((s) => s.trim());
-    if (parts.length < 3) {
-      warnings.push(`${i + 1}行目: 列が足りません: ${line}`);
+    if (parts.length < 4) {
+      warnings.push(`${i + 1}行目: 4列目(INJ_END_CA)がありません（3列の旧書式CSVは非対応）: ${line}`);
       return;
     }
-    const v = parts.slice(0, 3).map(Number);
+    const v = parts.slice(0, 4).map(Number);
     if (v.some((n) => Number.isNaN(n))) {
       warnings.push(`${i + 1}行目: 数値ではありません: ${line}`);
       return;
     }
-    rows.push({ rpm: v[0], inj: v[1], ign: v[2] });
+    rows.push({
+      rpm: v[0], inj: v[1], ign: v[2], end: v[3],
+    });
   });
   if (!rows.length) warnings.push('有効な行がありません');
   return { rows, warnings };
 }
 
 export function formatCsv(rows) {
-  return [CSV_HEADER, ...rows.map((r) => `${r.rpm},${r.inj},${r.ign}`)].join('\n') + '\n';
+  return [CSV_HEADER, ...rows.map((r) => `${r.rpm},${r.inj},${r.ign},${r.end}`)].join('\n') + '\n';
 }
 
 /**

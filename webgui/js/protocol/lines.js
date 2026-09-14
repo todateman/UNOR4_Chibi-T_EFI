@@ -104,16 +104,18 @@ export function parseVersion(ack) {
   return out;
 }
 
-/** MAP? の本文から (rpm, inj, ign) の配列を取り出す。 */
+/** MAP? の本文から (rpm, inj, ign, end) の配列を取り出す。 */
 export function parseDump(bodyLines) {
   const rows = [];
   for (const line of bodyLines) {
     if (!line || !/^\d/.test(line)) continue;   // ヘッダ行を捨てる
     const parts = line.split(',').map((s) => s.trim());
-    if (parts.length < 3) continue;
-    const v = parts.slice(0, 3).map(Number);
+    if (parts.length < 4) continue;
+    const v = parts.slice(0, 4).map(Number);
     if (v.some(Number.isNaN)) continue;
-    rows.push({ rpm: v[0], inj: v[1], ign: v[2] });
+    rows.push({
+      rpm: v[0], inj: v[1], ign: v[2], end: v[3],
+    });
   }
   return rows;
 }

@@ -24,17 +24,13 @@ void IRAM_ATTR G_PULSE_ISR();
 //-----------------------------------------------------------------------------
 
 #define ROUTINE_CYCLE_US     24
-#define STATUS_TASK_DELAY_MS  100   // タスク基本周期: 100ms (10Hz)
-#define SERIAL_USB_DIVISOR      5   // USB Serial 分周比: 5回に1回 = 500ms (2Hz)
-#define TELEM_LINE_MAX         96   // 機械可読テレメトリ1行のバッファ長
+#define STATUS_TASK_DELAY_MS 100      // タスク基本周期: 100ms (10Hz)
+#define SERIAL_USB_DIVISOR   5        // USB Serial 分周比: 5回に1回 = 500ms (2Hz)
+#define TELEM_LINE_MAX       96       // 機械可読テレメトリ1行のバッファ長
 
 #define PERIMETER_MM         1548UL   // [mm]
 #define TACHO_RPM_MAX        6000     // レブリミット（RPM）※これを超えると燃料噴射・点火停止
 #define Dwell_Time_US        5000     // ドゥエル時間（IGコイルへの充電時間）[us]
-#define start_INJ_time       80       // 始動時の燃料噴射時間（x0.1ms）
-#define start_IGN_CA         0        // 始動時の点火タイミング進角角度（CA）
-#define start_INJ_END_CA     20       // 始動時の燃料噴射終了タイミング角度（CA）
-#define INJ_END_CA           680      // 燃料噴射終了タイミング角度（CA）
 
 const uint8_t NE_A_IN      = 2;   // クランク角エンコーダAパルス(360°で360パルス)
 const uint8_t NE_B_IN      = 8;   // クランク角エンコーダBパルス(360°で360パルス)
@@ -81,6 +77,7 @@ volatile unsigned long speed        = 0;  // WH_INの速度（0.1 km/h 単位）
 bool ENG_ON                          = false; // エンジンONフラグ（キルスイッチに連動）
 volatile uint8_t  calculatedINJ_time = 0; // 燃料噴射時間（x0.1ms）
 volatile int16_t  calculatedIGN_CA   = 0; // 点火進角角度（CA）
+volatile int16_t  calculatedINJ_END_CA = 0; // 燃料噴射終了タイミング角度（CA）
 // MAP最終行を超える回転数（レブリミット相当）で true。
 // calculatedIGN_CA==0 は「0の値が入ったMAP行」と区別できないため、
 // 点火・噴射の新規トリガ可否はこのフラグで判定する（進行中のON_HOLDは止めない）。
@@ -241,34 +238,25 @@ int16_t readMA735SPI() {
 // エンジンMAP更新
 //-----------------------------------------------------------------------------
 void updateEngineMap() {
-  // スタータONの場合
-  if (startState == LOW) {
-    calculatedINJ_time = start_INJ_time;
-    calculatedIGN_CA   = start_IGN_CA;
-    mapOutOfRange = false;
-    activeMapRow  = 255;                // 始動時はMAPを使わず固定値
-  }
-  // スタータOFFの場合
-  else {
-    // アクティブバンクを1回だけ取得する。バンク切替は非アクティブ側を完成させてから
-    // 1バイトのストアで行われるため、参照中にテーブルが壊れることはない。
-    const MapTable &map = mapGetActive();
-    for (uint8_t i = 0; i < map.count; i++) {
-      if (tachoRpm < map.e[i].rpm) {
-        calculatedINJ_time = map.e[i].inj_time;
-        calculatedIGN_CA   = map.e[i].ign_ca;
-        mapOutOfRange = false;
-        activeMapRow  = i;
-        return;
-      }
+  // アクティブバンクを1回だけ取得する。バンク切替は非アクティブ側を完成させてから
+  // 1バイトのストアで行われるため、参照中にテーブルが壊れることはない。
+  const MapTable &map = mapGetActive();
+  for (uint8_t i = 0; i < map.count; i++) {
+    if (tachoRpm < map.e[i].rpm) {
+      calculatedINJ_time = map.e[i].inj_time;
+      calculatedIGN_CA   = map.e[i].ign_ca;
+      calculatedINJ_END_CA = map.e[i].inj_end_ca;
+      mapOutOfRange = false;
+      activeMapRow  = i;
+      return;
     }
-    // MAP上限を超える回転数では燃料噴射・点火を止める
-    calculatedINJ_time = 0;
-    calculatedIGN_CA   = 0;
-    mapOutOfRange = true;
-    activeMapRow  = 255;
-    return;
   }
+  // MAP上限を超える回転数では燃料噴射・点火を止める
+  calculatedINJ_time = 0;
+  calculatedIGN_CA   = 0;
+  mapOutOfRange = true;
+  activeMapRow  = 255;
+  return;
 }
 
 //-----------------------------------------------------------------------------
@@ -276,15 +264,13 @@ void updateEngineMap() {
 //-----------------------------------------------------------------------------
 void cycleReset() {
   updateEngineMap();
-  // 始動時は start_INJ_END_CA、通常時は INJ_END_CA を使用
-  int16_t inj_end_ca = (startState == LOW) ? start_INJ_END_CA : INJ_END_CA;
   // 燃料噴射開始タイミング角度を逆算（終了角度 - 噴射時間相当のCA）
   if (tachoWidth > 0) {
-    INJ_STR_CA = inj_end_ca - (int16_t)((uint32_t)calculatedINJ_time * 100UL * 360UL / tachoWidth);
+    INJ_STR_CA = calculatedINJ_END_CA - (int16_t)((uint32_t)calculatedINJ_time * 100UL * 360UL / tachoWidth);
     if (INJ_STR_CA < 0)
       INJ_STR_CA += 720;  // 0CA跨ぎ: サイクル後半の開始角度（0〜720CA）に変換
   } else {
-    INJ_STR_CA = inj_end_ca;
+    INJ_STR_CA = calculatedINJ_END_CA;
   }
   if (tachoRpm > TACHO_RPM_MAX) {
     timeNow_INJ_ON  = 0;

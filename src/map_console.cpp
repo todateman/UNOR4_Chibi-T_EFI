@@ -16,8 +16,8 @@
 #define TELEM_DIV_MAX          20
 #define TELEM_BASE_MS          100   // = main.cpp の STATUS_TASK_DELAY_MS
 
-#define FW_VERSION             "1.1.0"
-#define PROTO_VERSION          2
+#define FW_VERSION             "1.2.0"
+#define PROTO_VERSION          3   // v3: MAP列を4列化（rpm,inj,ign,inj_end_ca）
 
 // main.cpp のエンジン状態（EEPROM書き込みの安全ガードに使用）
 extern bool ENG_ON;
@@ -125,13 +125,15 @@ static bool parseUInt(const char*& s, unsigned long& out) {
 //-----------------------------------------------------------------------------
 static void cmdDump() {
   const MapTable& t = mapGetActive();
-  Serial.println(F("RPM,  INJ(0.1msec), IGN(CA)"));
+  Serial.println(F("RPM,  INJ(0.1msec), IGN(CA), INJ_END(CA)"));
   for (uint8_t i = 0; i < t.count; i++) {
     Serial.print(t.e[i].rpm);
     Serial.print(',');
     Serial.print(t.e[i].inj_time);
     Serial.print(',');
-    Serial.println(t.e[i].ign_ca);
+    Serial.print(t.e[i].ign_ca);
+    Serial.print(',');
+    Serial.println(t.e[i].inj_end_ca);
   }
   Serial.print(F("OK ROWS "));
   Serial.println(t.count);
@@ -162,10 +164,10 @@ static void cmdHelp() {
   Serial.println(F("MAP?                  dump current map as CSV"));
   Serial.println(F("MAP INFO              source / rows / crc / eeprom state"));
   Serial.println(F("MAP BEGIN             start CSV transfer session"));
-  Serial.println(F("  <rpm>,<inj>,<ign>   one CSV row (header line is skipped)"));
+  Serial.println(F("  <rpm>,<inj>,<ign>,<inj_end_ca>   one CSV row (header line is skipped)"));
   Serial.println(F("MAP END               validate and apply atomically"));
   Serial.println(F("MAP ABORT             discard the session"));
-  Serial.println(F("MAP SET r i g         change one row live"));
+  Serial.println(F("MAP SET r i g e       change one row live (rpm inj ign inj_end_ca)"));
   Serial.println(F("MAP SAVE              store to EEPROM (stopped only, skip if same)"));
   Serial.println(F("MAP LOAD              reload from EEPROM"));
   Serial.println(F("MAP DEFAULT           restore built-in default map"));
@@ -230,17 +232,17 @@ static void cmdSave() {
 }
 
 static void cmdSet(const char* args) {
-  unsigned long rpm, inj, ign;
+  unsigned long rpm, inj, ign, endCa;
   const char* p = args;
-  if (!parseUInt(p, rpm) || !parseUInt(p, inj) || !parseUInt(p, ign)) {
-    replyErr("USAGE_MAP_SET_RPM_INJ_IGN");
+  if (!parseUInt(p, rpm) || !parseUInt(p, inj) || !parseUInt(p, ign) || !parseUInt(p, endCa)) {
+    replyErr("USAGE_MAP_SET_RPM_INJ_IGN_ENDCA");
     return;
   }
-  if (rpm > 65535UL || inj > 255UL || ign > 65535UL) {
+  if (rpm > 65535UL || inj > 255UL || ign > 65535UL || endCa > 65535UL) {
     replyErr("VALUE_OUT_OF_RANGE");
     return;
   }
-  if (mapSetEntry((uint16_t)rpm, (uint8_t)inj, (uint16_t)ign)) {
+  if (mapSetEntry((uint16_t)rpm, (uint8_t)inj, (uint16_t)ign, (uint16_t)endCa)) {
     replyOk("SET");
   } else {
     replyErr("SET_REJECTED");
@@ -263,11 +265,11 @@ static void cmdEnd() {
 
 // セッション中のCSV行を処理
 static void handleCsvRow(const char* line) {
-  uint16_t rpm, ign;
+  uint16_t rpm, ign, endCa;
   uint8_t  inj;
   bool     skip;
 
-  if (!mapParseCsvLine(line, rpm, inj, ign, skip)) {
+  if (!mapParseCsvLine(line, rpm, inj, ign, endCa, skip)) {
     mapStagingClear();
     sessionActive = false;
     replyErr("BAD_CSV_LINE");
@@ -277,7 +279,7 @@ static void handleCsvRow(const char* line) {
     replyOk("SKIP");
     return;
   }
-  if (!mapStagingAppend(rpm, inj, ign)) {
+  if (!mapStagingAppend(rpm, inj, ign, endCa)) {
     mapStagingClear();
     sessionActive = false;
     replyErr("TOO_MANY_ROWS");

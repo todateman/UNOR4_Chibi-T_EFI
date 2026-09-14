@@ -7,10 +7,10 @@
 //   MAP?                     現在のMAPをCSVで出力
 //   MAP INFO                 出所・行数・CRC・EEPROM状態を表示
 //   MAP BEGIN                転送セッション開始（USBテレメトリを一時停止）
-//   <rpm>,<inj>,<ign>        セッション中の1行（ヘッダ行は自動スキップ）
+//   <rpm>,<inj>,<ign>,<inj_end_ca>   セッション中の1行（ヘッダ行は自動スキップ）
 //   MAP END                  検証して原子的に反映
 //   MAP ABORT                セッション破棄
-//   MAP SET <rpm> <inj> <ign>  1行だけライブ変更
+//   MAP SET <rpm> <inj> <ign> <inj_end_ca>  1行だけライブ変更
 //   MAP SAVE                 EEPROMへ保存（エンジン停止時のみ）
 //   MAP LOAD                 EEPROMから読み直し
 //   MAP DEFAULT              内蔵デフォルトMAPへ戻す

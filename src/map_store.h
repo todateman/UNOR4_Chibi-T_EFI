@@ -15,17 +15,19 @@
 #define MAP_MAX_ENTRIES  24        // MAP最大行数
 #define MAP_EEPROM_ADDR  0         // EEPROM上の格納オフセット
 #define MAP_MAGIC        0x3150414DUL  // "MAP1"
-#define MAP_VERSION      1
+#define MAP_VERSION      2         // v2: MapEntryにinj_end_ca追加（レイアウト変更）
 
 // MAP検証レンジ
-#define MAP_RPM_MAX      20000
-#define MAP_IGN_CA_MAX   90
+#define MAP_RPM_MAX         20000
+#define MAP_IGN_CA_MAX      90
+#define MAP_INJ_END_CA_MAX  720    // クランク角のフルサイクル（0〜720CA、0CA跨ぎ対応と整合）
 
 // MAP 1行分（RPMしきい値・燃料噴射時間・点火進角）
 struct MapEntry {
-  uint16_t rpm;       // RPMしきい値（この値未満なら当該行を採用）
-  uint8_t  inj_time;  // 燃料噴射時間（x0.1ms）
-  uint16_t ign_ca;    // 点火進角角度（CA）
+  uint16_t rpm;         // RPMしきい値（この値未満なら当該行を採用）
+  uint8_t  inj_time;    // 燃料噴射時間（x0.1ms）
+  uint16_t ign_ca;      // 点火進角角度（CA）
+  uint16_t inj_end_ca;  // 噴射終了CA（角度）
 };
 
 // MAPテーブル1面分
@@ -51,11 +53,12 @@ enum MapSaveResult : uint8_t {
 // 検証結果
 enum MapValidation : uint8_t {
   MAP_OK = 0,
-  MAP_ERR_EMPTY,        // 0行
-  MAP_ERR_TOO_MANY,     // MAP_MAX_ENTRIES超過
-  MAP_ERR_RPM_ORDER,    // RPMが厳密昇順でない
-  MAP_ERR_RPM_RANGE,    // RPMが範囲外
-  MAP_ERR_IGN_RANGE     // 点火進角が範囲外
+  MAP_ERR_EMPTY,             // 0行
+  MAP_ERR_TOO_MANY,          // MAP_MAX_ENTRIES超過
+  MAP_ERR_RPM_ORDER,         // RPMが厳密昇順でない
+  MAP_ERR_RPM_RANGE,         // RPMが範囲外
+  MAP_ERR_IGN_RANGE,         // 点火進角が範囲外
+  MAP_ERR_INJ_END_CA_RANGE   // 噴射終了角が範囲外
 };
 
 // 内蔵デフォルトMAP（EEPROM破損時のフォールバック）
@@ -85,7 +88,7 @@ uint16_t mapGetActiveCrc();
 void mapStagingClear();
 
 // ステージングバッファに1行追加。満杯ならfalse。
-bool mapStagingAppend(uint16_t rpm, uint8_t inj_time, uint16_t ign_ca);
+bool mapStagingAppend(uint16_t rpm, uint8_t inj_time, uint16_t ign_ca, uint16_t inj_end_ca);
 
 // ステージングバッファの現在行数
 uint8_t mapStagingCount();
@@ -102,7 +105,7 @@ void mapApplyDefault();
 
 // 1行だけライブ変更。rpmが既存行に一致すればその行を更新、
 // 一致しなければ昇順を保つ位置へ挿入する。falseなら行数超過または範囲外。
-bool mapSetEntry(uint16_t rpm, uint8_t inj_time, uint16_t ign_ca);
+bool mapSetEntry(uint16_t rpm, uint8_t inj_time, uint16_t ign_ca, uint16_t inj_end_ca);
 
 //-----------------------------------------------------------------------------
 // EEPROM入出力
@@ -122,11 +125,11 @@ MapSaveResult mapSaveToEEPROM();
 //-----------------------------------------------------------------------------
 // CSV行パース（シリアル転送とSD読み込みで共用）
 //-----------------------------------------------------------------------------
-// "rpm,inj,ign" 形式の1行をパースする。
+// "rpm,inj,ign,inj_end_ca" 形式の1行をパースする。
 // 空行・コメント行(# ;)・ヘッダ行("RPM"で始まる行)は skip=true で返り、
 // 値は書き込まれない。それ以外で数値として解釈できない場合は false を返す。
 bool mapParseCsvLine(const char* line, uint16_t& rpm, uint8_t& inj_time,
-                     uint16_t& ign_ca, bool& skip);
+                     uint16_t& ign_ca, uint16_t& inj_end_ca, bool& skip);
 
 // 検証エラーコードを人が読める文字列にする
 const char* mapValidationText(MapValidation v);

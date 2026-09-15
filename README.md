@@ -54,6 +54,7 @@ pio device monitor -b 115200
 | TACHO_RPM_MAX | 6000 | レブリミット <BR> （回転数上限保護） |
 | Dwell_Time_US | 5000 | ドゥエル時間（us） <BR> IGコイルへの充電時間 |
 | start_RPM | 1500 | スタータ自動停止の判定回転数（RPM） <BR> MAP切替用の専用定数ではない |
+| STR_IN_DEBOUNCE_MS | 30 | スタートスイッチのデバウンス時間（ms） <BR> チャタリングによる`STR_FAILED`からの誤再クランキング防止 |
 
 始動時・通常時で切り替わる専用定数（`start_INJ_time` 等）は無い。  
 燃料噴射量・点火進角・燃料噴射終了タイミングは全て単一の MAP テーブルから rpm に応じて読み出され、ビルドし直さずに USB シリアルから調整できる。  
@@ -102,7 +103,10 @@ LOW アクティブ出力注意 (INJ/IGN/STR/DISRESET)。
    - **スタータステートマシン** (`StarterState`): キルスイッチON時にスタートボタン押下（エッジ）でクランキング開始。  
      `start_RPM` 以上を 0.1秒 維持で始動成功（スタータ自動停止）、2秒タイムアウトで始動失敗（再押しで再試行可）。  
      低rpm帯のMAP行（400/800/1200rpm、`inj_end_ca`=20）が始動用パラメータとして自動的に採用される  
-     （始動専用のMAP切替フラグは無い。[MAP](#map) 節参照）。
+     （始動専用のMAP切替フラグは無い。[MAP](#map) 節参照）。  
+     スタートスイッチは `STR_IN_DEBOUNCE_MS`（既定30ms）でソフトウェアデバウンス済み。  
+     デバウンスが無いと、ボタンを押しっぱなしにした際のチャタリングで `STR_FAILED` から誤って
+     `STR_CRANKING` へ再突入し続け、スタータがOFFにならない不具合が起きる（実機検証で発見・修正）。
 
      ```txt
      STR_IDLE → [ボタン押下(エッジ)+キルスイッチON] → STR_CRANKING
@@ -462,14 +466,15 @@ python tools/send_map.py /tmp/bad_order.csv     # ERR RPM_NOT_ASCENDING で非�
 
 Ardu-Stim で回転信号を与えつつ、STR_IN/ENGOFF_IN 相当を操作する:
 
-- [ ] rpm を 0→`start_RPM`(1500) 以上へスイープしながら STR_IN を ON → STR_OUT が LOW になり、
-      `start_RPM` 到達から約100ms 後に STR_OUT が HIGH に戻る（`STR_STARTED`）
-- [ ] rpm を `start_RPM` 未満に維持したまま STR_IN を ON → STR_OUT が LOW になってから
-      2000ms 後に STR_OUT が HIGH に戻る（`STR_FAILED`）
-- [ ] `STR_FAILED` 状態で STR_IN を離さず維持 → 再クランキングしない（エッジ検出のみで再始動する設計の確認）
-- [ ] `STR_FAILED` 後に STR_IN を一度離してから再度 ON → `STR_CRANKING` へ再遷移し STR_OUT が再度 LOW になる
-- [ ] クランキング中に ENGOFF_IN を OFF → 即座に STR_OUT が HIGH に戻り `STR_IDLE` に戻る
-- [ ] 上記のいずれの遷移でも、走行距離・燃費・稼働時間（`Launch` 連動の積算）が途切れない
+- [x] rpm を 0→`start_RPM`(1500) 以上へスイープしながら STR_IN を ON → STR_OUT が LOW になり、 `start_RPM` 到達から約100ms 後に STR_OUT が HIGH に戻る（`STR_STARTED`）
+- [x] rpm を `start_RPM` 未満に維持したまま STR_IN を ON → STR_OUT が LOW になってから 2000ms 後に STR_OUT が HIGH に戻る（`STR_FAILED`）
+- [ ] `STR_FAILED` 状態で STR_IN を離さず維持 → 再クランキングしない（エッジ検出のみで再始動する設計の確認）  
+      ※実機検証でNG判明: STR_INのチャタリングにより`STR_FAILED`から誤って`STR_CRANKING`へ再突入し続け、
+      押し続けている間STR_OUTがLOWのまま延長される不具合を確認。`STR_IN_DEBOUNCE_MS`によるソフトウェア
+      デバウンスを追加して修正済み。実機での再検証待ち。
+- [x] `STR_FAILED` 後に STR_IN を一度離してから再度 ON → `STR_CRANKING` へ再遷移し STR_OUT が再度 LOW になる
+- [x] クランキング中に ENGOFF_IN を OFF → 即座に STR_OUT が HIGH に戻り `STR_IDLE` に戻る
+- [x] 上記のいずれの遷移でも、走行距離・燃費・稼働時間（`Launch` 連動の積算）が途切れない
       （キルスイッチOFFで `Launch` はリセットされない仕様の確認）
 
 > EEPROM を完全な未書き込み状態へ戻すコマンドは用意していない。  

@@ -31,7 +31,6 @@ void IRAM_ATTR G_PULSE_ISR();
 #define PERIMETER_MM         1548UL   // [mm]
 #define TACHO_RPM_MAX        6000     // レブリミット（RPM）※これを超えると燃料噴射・点火停止
 #define Dwell_Time_US        5000     // ドゥエル時間（IGコイルへの充電時間）[us]
-#define STR_IN_DEBOUNCE_MS   30       // スタートスイッチのデバウンス時間（ms）※チャタリングによる誤再クランキング防止
 
 const uint8_t NE_A_IN      = 2;   // クランク角エンコーダAパルス(360°で360パルス)
 const uint8_t NE_B_IN      = 8;   // クランク角エンコーダBパルス(360°で360パルス)
@@ -106,10 +105,8 @@ volatile bool G_Pulse_Flag = false;       // G_INのパルスフラグ（立ち�
 volatile bool CycleReset   = false;       // サイクルリセットフラグ（立ち上がり）
 
 bool Launch = false;                      // スタートフラグ（エンジン始動）
-bool startState = HIGH;                   // スタートスイッチ状態（デバウンス済み, OFF=HIGH, ON=LOW）
-bool lastStartState = HIGH;               // スタートスイッチの前回状態（デバウンス済み）
-bool startStateRaw = HIGH;                // スタートスイッチの生値（デバウンス前）
-unsigned long startDebounceMs = 0;        // startStateRaw が最後に変化した時刻（ms）
+bool startState = HIGH;                   // スタートスイッチ状態（OFF=HIGH, ON=LOW）
+bool lastStartState = HIGH;               // スタートスイッチの前回状態   
 bool STR_IN_state = false;                // エンジン始動状態
 
 // スタータ状態マシン（Issue #11: スタータ制御の自動化）
@@ -307,19 +304,8 @@ void cycleReset() {
 // Routine(): AGTimerより周期実行されるリアルタイム処理
 //-----------------------------------------------------------------------------
 void Routine() {
-  // スタートスイッチの状態を更新（デバウンス: STR_IN_DEBOUNCE_MS 安定するまで確定しない）
-  // チャタリングで一瞬だけ生値が変化しても、そのたびに startState が動くと
-  // STR_FAILED からの誤再クランキング（意図せずタイマーが再スタートし続ける）につながるため。
-  {
-    bool rawState = fastestdigitalRead(STR_IN);
-    unsigned long nowMs = millis();
-    if (rawState != startStateRaw) {
-      startStateRaw  = rawState;
-      startDebounceMs = nowMs;
-    } else if (nowMs - startDebounceMs >= STR_IN_DEBOUNCE_MS) {
-      startState = startStateRaw;
-    }
-  }
+  // スタートスイッチの状態を更新(OFF=HIGH, ON=LOW)
+  startState = fastestdigitalRead(STR_IN);
 
   // A/Fセンサの更新
   if (AFREnabled) {
@@ -364,20 +350,22 @@ void Routine() {
     CycleReset = false;
   }
 
-  // スタートスイッチ立上りエッジ検出（OFF→ON, デバウンス済み）
+  // スタートスイッチ立上りエッジ検出（OFF→ON）
   if (lastStartState == HIGH && startState == LOW) {
-    if (fastestdigitalRead(ENGOFF_IN) == LOW) {     // キルスイッチON（運転許可）
-      if (starterState == STR_IDLE || starterState == STR_FAILED) {
-        starterState    = STR_CRANKING;
-        strCrankStartMs = millis();
-        starterActive   = false;
-        starterFirstMs  = 0;
-        ENG_ON          = true;
-        Launch          = true;
-        if (starttime == 0) starttime = millis();
+    if (fastestdigitalRead(STR_IN) == LOW) {          // スタートスイッチON
+      if (fastestdigitalRead(ENGOFF_IN) == LOW) {     // キルスイッチON（運転許可）
+        if (starterState == STR_IDLE || starterState == STR_FAILED) {
+          starterState    = STR_CRANKING;
+          strCrankStartMs = millis();
+          starterActive   = false;
+          starterFirstMs  = 0;
+          ENG_ON          = true;
+          Launch          = true;
+          if (starttime == 0) starttime = millis();
+        }
       }
+      cycleReset();   // キルスイッチ状態に関わらず従来どおり実行
     }
-    cycleReset();   // キルスイッチ状態に関わらず従来どおり実行
   }
   lastStartState = startState;
 

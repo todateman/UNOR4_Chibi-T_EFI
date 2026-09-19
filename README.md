@@ -53,6 +53,7 @@ pio device monitor -b 115200
 | PERIMETER_MM | 1548 | タイヤ周長(mm) |
 | TACHO_RPM_MAX | 6000 | レブリミット <BR> （回転数上限保護） |
 | Dwell_Time_US | 5000 | ドゥエル時間（us） <BR> IGコイルへの充電時間 |
+| start_RPM | 1500 | スタータ自動停止の判定回転数（RPM） <BR> MAP切替用の専用定数ではない |
 
 始動時・通常時で切り替わる専用定数（`start_INJ_time` 等）は無い。  
 燃料噴射量・点火進角・燃料噴射終了タイミングは全て単一の MAP テーブルから rpm に応じて読み出され、ビルドし直さずに USB シリアルから調整できる。  
@@ -98,6 +99,19 @@ LOW アクティブ出力注意 (INJ/IGN/STR/DISRESET)。
 
 2. 周期関数 [`Routine`](src/main.cpp):
    - スタート/キル状態評価
+   - **スタータステートマシン** (`StarterState`): キルスイッチON時にスタートボタン押下（エッジ）でクランキング開始。  
+     `start_RPM` 以上を 0.1秒 維持で始動成功（スタータ自動停止）、2秒タイムアウトで始動失敗（再押しで再試行可）。  
+     低rpm帯のMAP行（400/800/1200rpm、`inj_end_ca`=20）が始動用パラメータとして自動的に採用される  
+     （始動専用のMAP切替フラグは無い。[MAP](#map) 節参照）。
+
+     ```txt
+     STR_IDLE → [ボタン押下(エッジ)+キルスイッチON] → STR_CRANKING
+     STR_CRANKING → [start_RPM以上を0.1秒維持] → STR_STARTED（スタータOFF）
+     STR_CRANKING → [2秒タイムアウト] → STR_FAILED（スタータOFF・ENG_ON OFF）
+     STR_FAILED → [ボタン再押し(エッジ)] → STR_CRANKING
+     キルスイッチOFF → 常に STR_IDLE へ強制リセット（`Launch` はリセットしない）
+     ```
+
    - カム同期タイムアウト→`cycleReset`
    - マップ更新: [`updateEngineMap`](src/main.cpp)
    - 噴射開始条件 (角度 >= `INJ_STR_CA`、MAP行の `inj_end_ca` と噴射時間から逆算、0CA跨ぎ対応)
@@ -362,7 +376,7 @@ T\t<seq>\t<ms>\t<rpm>\t<inj01>\t<ign>\t<spd01>\t<ne>\t<row>\t<flags>
 
 CSV パース・検証ルール・バンク切替・`send_map.py` のプロトコルはホスト側のテストで確認済み。  
 以下は**実機でしか確認できない項目**なので、車両に載せる前に順に潰すこと。  
-`1` → `7` の順（無負荷 → クランキング → 実走）で進めると手戻りが少ない。
+`1` → `8` の順（無負荷 → クランキング → 実走）で進めると手戻りが少ない。
 
 検証結果（Ardu-Stim + オシロによる代替検証、発見した不具合と修正内容を含む）:
 
@@ -444,6 +458,24 @@ python tools/send_map.py /tmp/bad_order.csv     # ERR RPM_NOT_ASCENDING で非�
       `calculatedINJ_time` / `calculatedIGN_CA` が 0 になり燃料噴射・点火が止まる
 - [ ] 実走行（車速センサ `WH_IN`・実負荷・実燃料噴射量）は Ardu-Stim では代替不可のため未検証。実車で確認すること。
 
+#### 8. スタータ自動制御（Issue #11）
+
+Ardu-Stim で回転信号を与えつつ、STR_IN/ENGOFF_IN 相当を操作する:
+
+- [x] rpm を 0→`start_RPM`(1500) 以上へスイープしながら STR_IN を ON → STR_OUT が LOW になり、
+      `start_RPM` 到達から約100ms 後に STR_OUT が HIGH に戻る（`STR_STARTED`）
+- [x] rpm を `start_RPM` 未満に維持したまま STR_IN を ON → STR_OUT が LOW になってから
+      2000ms 後に STR_OUT が HIGH に戻る（`STR_FAILED`）
+- [ ] `STR_FAILED` 状態で STR_IN を離さず維持 → 再クランキングしない（エッジ検出のみで再始動する設計の確認）  
+      ※Ardu-Stimベンチ環境では検証不可: STR_IN が実車配線の `74HC14` シュミットトリガを経由せず
+      MCUへ直結されるため、ボタン押下中に生ピンが数千回/秒オーダーでチャタリングし、
+      OFF→ONエッジが繰り返し検出されて `STR_FAILED` から `STR_CRANKING` へ誤って再突入し続ける
+      （実測: 1秒保持で生値が約1万回反転）。シュミットトリガ回路を通す実車配線での再検証が必要。
+- [x] `STR_FAILED` 後に STR_IN を一度離してから再度 ON → `STR_CRANKING` へ再遷移し STR_OUT が再度 LOW になる
+- [x] クランキング中に ENGOFF_IN を OFF → 即座に STR_OUT が HIGH に戻り `STR_IDLE` に戻る
+- [x] 上記のいずれの遷移でも、走行距離・燃費・稼働時間（`Launch` 連動の積算）が途切れない
+      （キルスイッチOFFで `Launch` はリセットされない仕様の確認）
+
 > EEPROM を完全な未書き込み状態へ戻すコマンドは用意していない。  
 > 既定値へ戻したい場合は `MAP DEFAULT` → `MAP SAVE`（出所は `EEPROM` のままになる）。
 
@@ -504,6 +536,8 @@ java -jar "$env:USERPROFILE\.vscode\extensions\jebbs.plantuml-2.18.1\plantuml.ja
 - [x] MAP内パラメータ選択・燃料噴射・点火処理高速化  
   (現状では処理遅れに起因すると思われる過大な進角角度を設定している)
 - [x] ビルド不要の MAP 書き換え (USB シリアル CSV 転送 + EEPROM 永続化)
+- [x] スタータ制御の自動化（Issue #11）  
+  (`start_RPM`×0.1秒維持で自動停止、2秒タイムアウトで失敗検出・再試行可。始動専用MAPフラグは廃止しMAP方式に一本化)
 - [ ] SD から MAP 読込実装 (`parseCSV`) ※ SD が使えるようになったら `mapParseCsvLine()` を再利用
 - [ ] AFR センサ補正ロジック (`updateAFR`)
 - [ ] クランク角推定のドリフト補正（非エンコーダ時）

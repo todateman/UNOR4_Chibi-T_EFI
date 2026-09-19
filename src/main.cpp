@@ -501,9 +501,9 @@ void statusTask(void *pvParameters) {
   uint8_t div_cnt = 0;
   uint8_t tel_cnt = 0;
   uint16_t telSeq = 0;
-  char s1buf[64];
   // configCHECK_FOR_STACK_OVERFLOW=0 でスタック破壊が静かに起きるため、
-  // テレメトリ用バッファはスタックではなくstaticに置く。
+  // 送信用バッファはスタックではなくstaticに置く。
+  static char s1buf[80];
   static char telBuf[TELEM_LINE_MAX];
 
   for (;;) {
@@ -516,16 +516,24 @@ void statusTask(void *pvParameters) {
       unsigned gas10 = (unsigned)(gasml * 10.0f + 0.5f);
       unsigned dis10 = (unsigned)(dispergas * 10.0f + 0.5f);
       int len = snprintf(s1buf, sizeof(s1buf),
-        "%u,%u.%u,%d,%lu.%lu,%u,%u.%u,%u.%u,%u\n",
+        "%u,%u.%u,%d,%d,%lu.%lu,%u,%u.%u,%u.%u,%u",
         (unsigned)tachoRpm,           // RPM
         inj10 / 10, inj10 % 10,       // INJ_timems
         (int)calculatedIGN_CA,        // calculatedIGN_CA
+        (int)calculatedINJ_END_CA,    // 噴射終了角 [CA]（MAP外では前回値が残る）
         speed / 10, speed % 10,       // speed
         (unsigned)distance,           // distance
         gas10 / 10, gas10 % 10,       // gasml
         dis10 / 10, dis10 % 10,       // dispergas
         (unsigned)worktime);          // worktime
-      if (len > 0) Serial1.write((uint8_t*)s1buf, (size_t)len);
+      // 行末に "*XX\n"（XX = 先頭から'*'直前までのXOR）を付ける。ロガーはRXバッファ溢れ等で
+      // 欠けた行をこれで検出して捨てる（欠けた行が有効な値として読まれるのを防ぐ）。
+      if (len > 0 && len < (int)sizeof(s1buf) - 5) {
+        uint8_t cs = 0;
+        for (int i = 0; i < len; i++) cs ^= (uint8_t)s1buf[i];
+        len += snprintf(s1buf + len, sizeof(s1buf) - (size_t)len, "*%02X\n", (unsigned)cs);
+        Serial1.write((uint8_t*)s1buf, (size_t)len);
+      }
     }
 
     // ── 機械可読テレメトリ（TELEM ON のときだけ。既定OFF）────────────────

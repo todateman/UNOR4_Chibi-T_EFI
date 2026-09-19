@@ -244,13 +244,15 @@ Pages 版にはローカルサーバが居ないため、「ローカルサー�
 
 - `MAP SAVE` は `eng=OFF` かつ `rpm=0` のときだけ押せる。  
   ベンチではノイズで `ERR ENGINE_RUNNING` が返ることがあるので最大 5 回リトライする
-- **稼働中は RPM 列を編集できない**。`MAP SET` は該当 RPM が無いと行を挿入する仕様なので、走行中に意図せずテーブル構造が変わるのを防ぐ
+- **稼働中は RPM 列を編集できない**。  
+  `MAP SET` は該当 RPM が無いと行を挿入する仕様なので、走行中に意図せずテーブル構造が変わるのを防ぐ
 - ライブ適用は明示的に有効化したときだけ動き、**60 秒無操作で自動解除**。  
   1 操作の変化量が噴射 ±1.0ms / 進角 ±5CA / 噴射終了 ±30CA を超える場合は送らない
 - 送信前にファームと同じ規則で検証し、違反セルを赤表示して転送を止める
 - **MAP 最終行の RPM がレブリミット（`TACHO_RPM_MAX` = 6000）より手前だと警告する**。  
   最終行を超えると噴射・点火が止まる（`mapOutOfRange`）ため
-- **噴射区間が 360CA を跨ぐ行を警告する**。ファームは `Ne_deg >= 360` で噴射中なら強制 OFF する（360CA 安全リセット）ので、その行は MAP の指示より噴射が短くなる。  
+- **噴射区間が 360CA を跨ぐ行を警告する**。  
+  ファームは `Ne_deg >= 360` で噴射中なら強制 OFF する（360CA 安全リセット）ので、その行は MAP の指示より噴射が短くなる。  
   噴射区間はファームと同じ式 `inj_time × 100[us] × 360 / tachoWidth` で角度に直し、その行が受け持つ最大 rpm で最悪値を見る。  
   噴射終了角は `inj` と `rpm` を合わせて初めて実害が見えるので、列単体の範囲検査では拾えない
 - **噴射終了角が前行から 90CA（周回距離）以上跳ぶと警告する**
@@ -521,10 +523,14 @@ AGTimer: [`AGTimer.init(period_us, callback)`](lib/AGTimer_R4_Library/src/AGTime
 
 ## ログ / 出力
 
-| ポート | 形式 | 周期 | フィールド |
-| --- | --- | --- | --- |
-| `Serial1` (HW UART) | CSV | **10Hz (100ms)** | RPM, INJ(ms), IGN_CA, speed, distance, fuel(ml), km/L, worktime |
-| `Serial` (USB CDC) | タブ区切り | 2Hz (500ms) | 上記 + Ne_deg |
+| ポート | 形式 | 周期 | フィールド | 出力先 |
+| --- | --- | --- | --- | --- |
+| `Serial1` (HW UART) | CSV + XORチェックサム | **10Hz (100ms)** | RPM, INJ(ms), IGN_CA, INJ_END(CA), speed, distance, fuel(ml), km/L, worktime | ロガー (ESP32) <BR>https://github.com/todateman/Chibi-T_Furoshiki_Logger |
+| `Serial` (USB CDC) | タブ区切り | 2Hz (500ms) | 上記 + Ne_deg | PC (USB) |
+
+`Serial1` の行末は `*XX`（XX = 先頭から `*` 直前までの全バイトのXOR、16進2桁）。  
+ロガーは不一致の行を捨てる。`INJ_END(CA)` は MAP 範囲外では前回値が残る。  
+INJ_END を IGN_CA の直後に挿入したため、**EFI とロガーは必ず同時に更新する**（旧形式とは非互換）。
 
 speed は 0.1km/h 分解能。停止時は最終パルス経過時間で減衰し、約8秒後に 0.0 へ。
 

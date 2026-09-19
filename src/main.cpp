@@ -119,6 +119,7 @@ uint16_t      start_RPM       = 1500;     // 始動成功判定の回転数（RP
 unsigned long strCrankStartMs = 0;        // クランキング開始時刻（ms）
 unsigned long starterFirstMs  = 0;        // start_RPM到達判定の開始時刻（ms）
 bool          starterActive   = false;    // start_RPM維持判定中フラグ
+unsigned long STARTER_TIMEOUT_MS = 1000;  // スタータタイムアウト（ms）
 
 volatile float gasml       = 0.0;         // 燃料消費量（ml）
 volatile float INJ_timems  = 0.0;         // 燃料噴射時間（ms）
@@ -460,8 +461,8 @@ void Routine() {
           starterFirstMs = 0;                             // 始動成功判定開始時刻リセット
         }
 
-        // 2秒タイムアウト
-        if (nowMs - strCrankStartMs >= 2000UL) {
+        // スタータタイムアウト時間を経過した場合は、始動失敗とみなす
+        if (nowMs - strCrankStartMs >= STARTER_TIMEOUT_MS) {
           starterState = STR_FAILED;                      // 始動失敗状態へ
           fastestdigitalWrite(STR_OUT, HIGH);             // スタータOFF
           STR_IN_state = false;                           // スタータ入力状態OFF

@@ -6,7 +6,7 @@
 //
 // 更新時は CACHE の版数を上げること。
 
-const CACHE = 'map-tuner-v2';
+const CACHE = 'map-tuner-v3';
 
 const ASSETS = [
   './',

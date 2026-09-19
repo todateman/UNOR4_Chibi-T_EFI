@@ -315,7 +315,7 @@ python tools/send_map.py microSD/RPM_2024MOTEGI.CSV --legacy-inj-end-ca 680
 | `TELEM ON [ms]` | 機械可読テレメトリを開始<BR>（既定 OFF、100〜2000ms、100ms 単位） | 可 |
 | `TELEM OFF` | 停止して従来の 2Hz 人間向け出力へ戻す | 可 |
 | `TELEM?` | `on=` / `ms=` / `drop=`（取りこぼし数）を表示 | 可 |
-| `VER` | `OK VER <fw> proto=<n>`<BR>（現行 `1.3.0` / `proto=4`。v3 で MAP を 4 列化、<BR>v4 でテレメトリに `inj_end` を追加） | 可 |
+| `VER` | `OK VER <fw> proto=<n>`<BR>（現行 `1.3.0` / `proto=5`。v3 で MAP を 4 列化、<BR>v4 でテレメトリに `inj_end` を追加、<BR>v5 で `inj_end` を `ign` の直後へ移動） | 可 |
 | `PING` | `OK PONG`<BR>（副作用のない疎通確認・レイテンシ計測） | 可 |
 | `HELP` | コマンド一覧 | 可 |
 
@@ -329,7 +329,7 @@ GUI のライブトレース用に、`statusTask` の高速パス（100ms 周期
 `TELEM ON` の間は 2Hz の人間向けタブ行を止め、2 つの書式が混ざらないようにする。
 
 ```text
-T\t<seq>\t<ms>\t<rpm>\t<inj01>\t<ign>\t<spd01>\t<ne>\t<row>\t<flags>\t<inj_end>
+T\t<seq>\t<ms>\t<rpm>\t<inj01>\t<ign>\t<inj_end>\t<spd01>\t<ne>\t<row>\t<flags>
 ```
 
 | 欄 | 内容 | 単位 |
@@ -339,17 +339,19 @@ T\t<seq>\t<ms>\t<rpm>\t<inj01>\t<ign>\t<spd01>\t<ne>\t<row>\t<flags>\t<inj_end>
 | `rpm` | `tachoRpm` | RPM |
 | `inj01` | `calculatedINJ_time` | ×0.1ms |
 | `ign` | `calculatedIGN_CA` | CA |
+| `inj_end` | `calculatedINJ_END_CA`（MAP 範囲外では前回値が残る） | CA |
 | `spd01` | `speed` | ×0.1km/h |
 | `ne` | `Ne_deg` | CA |
 | `row` | 採用中の MAP 行 index（255 = MAP 未使用。始動時・範囲外） | — |
 | `flags` | bit0 `ENG_ON` / bit1 `Launch` / bit2 クランキング / bit3 `mapOutOfRange` | — |
-| `inj_end` | `calculatedINJ_END_CA`（proto=4 で追加） | CA |
 
 - **タブ区切りを保っている**のは、`send_map.py` が「タブを含む行＝テレメトリ」として
   読み飛ばす実装だから。  
   この書式なら CLI を 1 行も変えずに共存できる。
-- **`inj_end` を末尾に足した**のは、旧 GUI / 旧 CLI のパーサが先頭 10 個だけを読む実装だから。  
-  新ファーム × 旧ツールはそのまま動き、旧ファーム × 新 GUI ではこの欄が無いものとして「—」を表示する。  
+- **MAP 由来の 3 値（`inj` / `ign` / `inj_end`）を隣り合わせに並べた**（proto=5 で `inj_end` を末尾から移動）。  
+  列数は proto=4 と同じ 11 なので **旧ツールとは互換がない**（`spd` 以降が黙って 1 列ずれる）。  
+  Web GUI / `map_gui.py` は `VER` の `proto` を見て、5 未満のファームには `TELEM ON` を送らず、2Hz の旧形式表示にフォールバックする。  
+  旧ツール × 新ファームは表示が壊れるので、ツールも同時に更新すること
   `ign` の隣に差し込むと `row` と `flags` が黙ってずれるので、順序は変えない。
 - `calculatedINJ_END_CA` は **MAP 範囲外でもゼロクリアされない。**  
   （`updateEngineMap()` は `inj`/`ign` だけ 0 にする）  

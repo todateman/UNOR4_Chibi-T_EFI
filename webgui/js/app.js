@@ -6,7 +6,7 @@
 import { WebSerialTransport } from './transport/webserial.js';
 import { HttpBridgeTransport } from './transport/httpbridge.js';
 import {
-  parseInfo, parseVersion, parseDump, isRunning, FLAG,
+  parseInfo, parseVersion, parseDump, isRunning, FLAG, TELEMETRY_MIN_PROTO,
 } from './protocol/lines.js';
 import * as M from './model/maptable.js';
 import * as CSV from './model/csv.js';
@@ -139,14 +139,15 @@ async function afterConnect() {
   }
   say(`接続しました: ${state.portName} (fw=${state.version.fw} proto=${state.version.proto})`, 'ok');
 
-  if (state.version.proto >= 2) {
+  // T行の列順は proto=5 で変わった。版数が合わないファームに TELEM ON すると値が黙ってずれる。
+  if (state.version.proto >= TELEMETRY_MIN_PROTO) {
     try {
       const r = await state.transport.command('TELEM ON 100');
       say(`テレメトリ開始: ${r.code}`, 'dim');
     } catch (e) { say(`テレメトリを開始できません: ${e.message}`, 'warn'); }
   } else {
-    say('このファームは機械可読テレメトリ(TELEM)に未対応です。'
-      + '2Hzの旧形式で表示します（行番号と状態フラグは取得できません）。', 'warn');
+    say(`このファームは機械可読テレメトリ(TELEM)の版が合いません(proto=${state.version.proto}, 必要: ${TELEMETRY_MIN_PROTO}以上)。`
+      + '2Hzの旧形式で表示します（行番号・状態フラグ・噴射終了角は取得できません）。', 'warn');
   }
 
   await readFromDevice();
@@ -534,7 +535,7 @@ function render() {
   $('#v-rpm').textContent = t ? t.rpm : '—';
   $('#v-inj').textContent = t ? (t.inj01 / 10).toFixed(1) : '—';
   $('#v-ign').textContent = t ? t.ign : '—';
-  // 噴射終了角は proto>=4 のファームだけが載せてくる。MAP外(row=255)のときは
+  // 噴射終了角は機械可読テレメトリ(proto>=5)だけが載せてくる。MAP外(row=255)のときは
   // ファームが前回値を持ち回っているだけなので出さない。
   $('#v-end').textContent = (t && t.end !== null && t.row !== 255) ? t.end : '—';
   $('#v-spd').textContent = t ? (t.spd01 / 10).toFixed(1) : '—';

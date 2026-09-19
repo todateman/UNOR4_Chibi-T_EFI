@@ -32,7 +32,7 @@ from map_protocol import (
 )
 
 FW_VERSION = "1.3.0"
-PROTO_VERSION = 4
+PROTO_VERSION = 5
 LINE_MAX = 96
 TELEM_BASE_MS = 100
 
@@ -174,7 +174,7 @@ class FakeEcu:
         ms = int((time.monotonic() - self._t0) * 1000)
         ne = int((time.monotonic() * 360) % 720)
         self._write(
-            f"T\t{self._seq}\t{ms}\t{rpm}\t{inj}\t{ign}\t0\t{ne}\t{row}\t{flags}\t{end}\n")
+            f"T\t{self._seq}\t{ms}\t{rpm}\t{inj}\t{ign}\t{end}\t0\t{ne}\t{row}\t{flags}\n")
 
     def pump(self) -> None:
         """時間経過に応じてテレメトリを生成する。read() から呼ばれる。"""

@@ -44,8 +44,10 @@ ARDUINO_VIDS = (0x2341, 0x2A03)
 
 # このPCツールが前提とするプロトコル版数（src/map_console.cpp の PROTO_VERSION と一致）。
 # proto=2以下のファームはMAPが3列（rpm,inj,ign）のままで、inj_end_ca非対応。
-# proto=3のファームはテレメトリに噴射終了角を載せない（Telemetry.end が None になる）。
-PROTO_VERSION = 4
+# テレメトリT行は proto=5 で inj_end を ign の直後へ移した。列数は proto=4 と同じ11で
+# 見分けが付かないため、proto<5 のファームには TELEM ON しないこと（値が黙ってずれる）。
+PROTO_VERSION = 5
+TELEMETRY_MIN_PROTO = 5
 
 # MAP検証レンジ（src/map_store.h と一致させること）
 MAP_MAX_ENTRIES = 24
@@ -99,7 +101,7 @@ class Telemetry:
     ne: int = 0             # CA
     row: int = 255          # 採用中のMAP行。255 = MAP未使用（始動時・範囲外）
     flags: int = 0
-    end: Optional[int] = None   # 噴射終了角 [CA]。proto<=3 のファームは載せてこない
+    end: Optional[int] = None   # 噴射終了角 [CA]。旧2Hz書式は持たない
     legacy: bool = False    # 旧2Hz書式から復元したサンプル
 
     FLAG_ENG_ON = 0x01
@@ -124,21 +126,20 @@ class Telemetry:
 def parse_telemetry(text: str) -> Optional[Telemetry]:
     """テレメトリ行をパースする。新書式・旧書式の両方に対応。
 
-    新: T\\t<seq>\\t<ms>\\t<rpm>\\t<inj01>\\t<ign>\\t<spd01>\\t<ne>\\t<row>\\t<flags>[\\t<inj_end>]
+    新: T\\t<seq>\\t<ms>\\t<rpm>\\t<inj01>\\t<ign>\\t<inj_end>\\t<spd01>\\t<ne>\\t<row>\\t<flags>
     旧: <rpm>\\t<inj_ms>\\t<ign>\\t<speed>\\t<dist>\\t<gas>\\t<fuel>\\t<work>\\t<ne>
 
-    inj_end は proto=4 で末尾に追加された。無ければ end=None になるだけなので、
-    proto=3 のファームもそのまま読める。
+    T行は proto=5 の並び（inj_end が ign の直後）のみ受け付ける。proto<=4 の行は
+    列数が違う/同じで区別できないので、呼び出し側が版数を見て TELEM ON を控えること。
     """
     parts = text.split("\t")
     try:
         if parts[0] == "T":
-            if len(parts) < 10:
+            if len(parts) != 11:
                 return None
-            v = [int(x) for x in parts[1:10]]
-            end = int(parts[10]) if len(parts) >= 11 else None
+            v = [int(x) for x in parts[1:]]
             return Telemetry(seq=v[0], ms=v[1], rpm=v[2], inj01=v[3], ign=v[4],
-                             spd01=v[5], ne=v[6], row=v[7], flags=v[8], end=end)
+                             end=v[5], spd01=v[6], ne=v[7], row=v[8], flags=v[9])
         if len(parts) == 9:
             # 旧書式は小数を含み、seq/row/flags を持たない
             return Telemetry(

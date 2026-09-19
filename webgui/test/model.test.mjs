@@ -378,18 +378,17 @@ test('cellErrors が噴射終了角の範囲外を特定する', () => {
   assert.equal(validate(rows), 'INJ_END_CA_OUT_OF_RANGE');
 });
 
-test('テレメトリの噴射終了角は末尾追記なので旧ファームとも互換', () => {
-  // proto=4: 11列目に噴射終了角
-  const now = parseTelemetry('T\t12\t34567\t2480\t44\t20\t183\t213\t5\t9\t680');
+test('テレメトリは inj_end が ign の直後（proto=5）', () => {
+  const now = parseTelemetry('T\t12\t34567\t2480\t44\t20\t680\t183\t213\t5\t9');
+  assert.equal(now.ign, 20);
   assert.equal(now.end, 680);
-  assert.equal(now.row, 5);      // 追記で row/flags がずれていないこと
+  assert.equal(now.spd01, 183);  // 挿入で spd/ne/row/flags がずれていないこと
+  assert.equal(now.ne, 213);
+  assert.equal(now.row, 5);
   assert.equal(now.flags, 9);
 
-  // proto<=3: 10列のまま。end は null になるだけで他は従来どおり
-  const old = parseTelemetry('T\t12\t34567\t2480\t44\t20\t183\t213\t5\t9');
-  assert.equal(old.end, null);
-  assert.equal(old.row, 5);
-  assert.equal(old.flags, 9);
+  // proto<=3 の10列は受け付けない（版数を見てTELEM ONしない前提）
+  assert.equal(parseTelemetry('T\t12\t34567\t2480\t44\t20\t183\t213\t5\t9'), null);
 
   // 旧2Hz書式も end を持たない
   assert.equal(parseTelemetry('1560\t4.0\t15\t18.4\t0\t0.0\t0.0\t12\t213').end, null);
@@ -397,8 +396,8 @@ test('テレメトリの噴射終了角は末尾追記なので旧ファーム�
 
 test('テレメトリログCSVが噴射終了角を往復し、旧ログも読める', () => {
   const samples = [
-    parseTelemetry('T\t1\t100\t2480\t44\t20\t183\t213\t5\t1\t680'),
-    parseTelemetry('T\t2\t200\t2480\t44\t20\t183\t213\t5\t1'),   // end 無し
+    parseTelemetry('T\t1\t100\t2480\t44\t20\t680\t183\t213\t5\t1'),
+    { ...parseTelemetry('T\t2\t200\t2480\t44\t20\t680\t183\t213\t5\t1'), end: null },   // end 無し
   ];
   const back = parseTelemetryCsv(telemetryCsv(samples));
   assert.equal(back.length, 2);
@@ -461,7 +460,7 @@ test('行の分類', () => {
 });
 
 test('テレメトリのパース（新書式）', () => {
-  const s = parseTelemetry('T\t12\t34567\t2480\t44\t20\t183\t213\t5\t9');
+  const s = parseTelemetry('T\t12\t34567\t2480\t44\t20\t680\t183\t213\t5\t9');
   assert.deepEqual(
     { seq: s.seq, rpm: s.rpm, inj01: s.inj01, ign: s.ign, spd01: s.spd01, row: s.row },
     { seq: 12, rpm: 2480, inj01: 44, ign: 20, spd01: 183, row: 5 },
@@ -474,7 +473,7 @@ test('row=255 は「MAPを参照していない」を意味する', () => {
   // 実機で見つけた不具合の固定。回転信号が1.2秒無いとファームは噴射・点火を止める。
   // そのとき row=255 が来るので、回転数から行を推測し直してはいけない
   // （rpm=0 から推測すると先頭行を指してしまい、止まっているのにハイライトが残る）。
-  const s = parseTelemetry('T\t1\t100\t0\t0\t0\t0\t213\t255\t0');
+  const s = parseTelemetry('T\t1\t100\t0\t0\t0\t0\t0\t213\t255\t0');
   assert.equal(s.row, 255);
   assert.equal(s.legacy, false);
   // 旧書式は row を持たないので、そのときだけ推測にフォールバックしてよい

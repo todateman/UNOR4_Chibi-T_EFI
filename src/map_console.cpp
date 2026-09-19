@@ -19,7 +19,8 @@
 #define FW_VERSION             "1.3.0"
 // v3: MAP列を4列化（rpm,inj,ign,inj_end_ca）
 // v4: テレメトリT行の末尾に inj_end を追加（先頭10個だけ読む旧パーサとは互換）
-#define PROTO_VERSION          4
+// v5: テレメトリT行の inj_end を ign の直後へ移動（列数は同じ11なので旧パーサとは非互換）
+#define PROTO_VERSION          5
 
 // main.cpp のエンジン状態（EEPROM書き込みの安全ガードに使用）
 extern bool ENG_ON;

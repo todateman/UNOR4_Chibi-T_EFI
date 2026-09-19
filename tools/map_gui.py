@@ -127,8 +127,9 @@ class Bridge:
         except MapConsoleError:
             pass   # 旧ファーム、または起動直後で応答が遅い
 
-        # proto>=2 のファームだけが機械可読テレメトリに対応している
-        if version.get("proto", 1) >= 2:
+        # T行の列順は proto=5 で変わった。版数が合わないファームに TELEM ON すると
+        # 値が黙ってずれるので、対応版だけで有効化する。
+        if version.get("proto", 1) >= mp.TELEMETRY_MIN_PROTO:
             try:
                 self.console.telemetry(True, 100)
             except MapConsoleError:

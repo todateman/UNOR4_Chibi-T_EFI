@@ -65,7 +65,7 @@ class TestPureFunctions(unittest.TestCase):
             self.assertEqual(mp.classify_line(text), want, text)
 
     def test_parse_telemetry_new(self):
-        s = mp.parse_telemetry("T\t12\t34567\t2480\t44\t20\t183\t213\t5\t9\t680")
+        s = mp.parse_telemetry("T\t12\t34567\t2480\t44\t20\t680\t183\t213\t5\t9")
         self.assertIsNotNone(s)
         self.assertEqual((s.seq, s.ms, s.rpm, s.inj01, s.ign), (12, 34567, 2480, 44, 20))
         self.assertEqual((s.spd01, s.ne, s.row), (183, 213, 5))
@@ -74,12 +74,9 @@ class TestPureFunctions(unittest.TestCase):
         self.assertTrue(s.out_of_range)    # bit3
         self.assertFalse(s.legacy)
 
-    def test_parse_telemetry_without_inj_end(self):
-        """proto<=3 のファーム（10列）もそのまま読めること。"""
-        s = mp.parse_telemetry("T\t12\t34567\t2480\t44\t20\t183\t213\t5\t9")
-        self.assertIsNotNone(s)
-        self.assertEqual((s.rpm, s.inj01, s.ign, s.row), (2480, 44, 20, 5))
-        self.assertIsNone(s.end)
+    def test_parse_telemetry_rejects_old_layout(self):
+        """proto<=3 の10列は受け付けない（版数を見てTELEM ONしない前提）。"""
+        self.assertIsNone(mp.parse_telemetry("T\t12\t34567\t2480\t44\t20\t183\t213\t5\t9"))
 
     def test_parse_telemetry_legacy(self):
         s = mp.parse_telemetry("1560\t4.0\t15\t18.4\t0\t0.0\t0.0\t12\t213")
@@ -145,7 +142,7 @@ class TestConsole(ConsoleTestCase):
     def test_ping_and_version(self):
         self.assertLess(self.console.ping(), 1.0)
         v = self.console.version()
-        self.assertEqual(v["proto"], 4)
+        self.assertEqual(v["proto"], 5)
         self.assertEqual(v["fw"], "1.3.0")
 
     def test_dump_matches_default(self):
@@ -309,7 +306,7 @@ class TestTelemetryStream(ConsoleTestCase):
         # seq が単調増加している = 応答とテレメトリが取り違えられていない
         seqs = [s.seq for s in self.telemetry]
         self.assertEqual(seqs, sorted(seqs))
-        # proto=4 なので噴射終了角が載っており、採用行の値と一致する
+        # proto=5 なので噴射終了角が載っており、採用行の値と一致する
         for s in self.telemetry:
             if s.row != 255:
                 self.assertEqual(s.end, self.ecu.rows[s.row][3])

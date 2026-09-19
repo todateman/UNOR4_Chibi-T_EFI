@@ -244,13 +244,15 @@ Pages 版にはローカルサーバが居ないため、「ローカルサー�
 
 - `MAP SAVE` は `eng=OFF` かつ `rpm=0` のときだけ押せる。  
   ベンチではノイズで `ERR ENGINE_RUNNING` が返ることがあるので最大 5 回リトライする
-- **稼働中は RPM 列を編集できない**。`MAP SET` は該当 RPM が無いと行を挿入する仕様なので、走行中に意図せずテーブル構造が変わるのを防ぐ
+- **稼働中は RPM 列を編集できない**。  
+  `MAP SET` は該当 RPM が無いと行を挿入する仕様なので、走行中に意図せずテーブル構造が変わるのを防ぐ
 - ライブ適用は明示的に有効化したときだけ動き、**60 秒無操作で自動解除**。  
   1 操作の変化量が噴射 ±1.0ms / 進角 ±5CA / 噴射終了 ±30CA を超える場合は送らない
 - 送信前にファームと同じ規則で検証し、違反セルを赤表示して転送を止める
 - **MAP 最終行の RPM がレブリミット（`TACHO_RPM_MAX` = 6000）より手前だと警告する**。  
   最終行を超えると噴射・点火が止まる（`mapOutOfRange`）ため
-- **噴射区間が 360CA を跨ぐ行を警告する**。ファームは `Ne_deg >= 360` で噴射中なら強制 OFF する（360CA 安全リセット）ので、その行は MAP の指示より噴射が短くなる。  
+- **噴射区間が 360CA を跨ぐ行を警告する**。  
+  ファームは `Ne_deg >= 360` で噴射中なら強制 OFF する（360CA 安全リセット）ので、その行は MAP の指示より噴射が短くなる。  
   噴射区間はファームと同じ式 `inj_time × 100[us] × 360 / tachoWidth` で角度に直し、その行が受け持つ最大 rpm で最悪値を見る。  
   噴射終了角は `inj` と `rpm` を合わせて初めて実害が見えるので、列単体の範囲検査では拾えない
 - **噴射終了角が前行から 90CA（周回距離）以上跳ぶと警告する**
@@ -313,7 +315,7 @@ python tools/send_map.py microSD/RPM_2024MOTEGI.CSV --legacy-inj-end-ca 680
 | `TELEM ON [ms]` | 機械可読テレメトリを開始<BR>（既定 OFF、100〜2000ms、100ms 単位） | 可 |
 | `TELEM OFF` | 停止して従来の 2Hz 人間向け出力へ戻す | 可 |
 | `TELEM?` | `on=` / `ms=` / `drop=`（取りこぼし数）を表示 | 可 |
-| `VER` | `OK VER <fw> proto=<n>`<BR>（現行 `1.3.0` / `proto=4`。v3 で MAP を 4 列化、<BR>v4 でテレメトリに `inj_end` を追加） | 可 |
+| `VER` | `OK VER <fw> proto=<n>`<BR>（現行 `1.3.0` / `proto=5`。v3 で MAP を 4 列化、<BR>v4 でテレメトリに `inj_end` を追加、<BR>v5 で `inj_end` を `ign` の直後へ移動） | 可 |
 | `PING` | `OK PONG`<BR>（副作用のない疎通確認・レイテンシ計測） | 可 |
 | `HELP` | コマンド一覧 | 可 |
 
@@ -327,7 +329,7 @@ GUI のライブトレース用に、`statusTask` の高速パス（100ms 周期
 `TELEM ON` の間は 2Hz の人間向けタブ行を止め、2 つの書式が混ざらないようにする。
 
 ```text
-T\t<seq>\t<ms>\t<rpm>\t<inj01>\t<ign>\t<spd01>\t<ne>\t<row>\t<flags>\t<inj_end>
+T\t<seq>\t<ms>\t<rpm>\t<inj01>\t<ign>\t<inj_end>\t<spd01>\t<ne>\t<row>\t<flags>
 ```
 
 | 欄 | 内容 | 単位 |
@@ -337,17 +339,19 @@ T\t<seq>\t<ms>\t<rpm>\t<inj01>\t<ign>\t<spd01>\t<ne>\t<row>\t<flags>\t<inj_end>
 | `rpm` | `tachoRpm` | RPM |
 | `inj01` | `calculatedINJ_time` | ×0.1ms |
 | `ign` | `calculatedIGN_CA` | CA |
+| `inj_end` | `calculatedINJ_END_CA`（MAP 範囲外では前回値が残る） | CA |
 | `spd01` | `speed` | ×0.1km/h |
 | `ne` | `Ne_deg` | CA |
 | `row` | 採用中の MAP 行 index（255 = MAP 未使用。始動時・範囲外） | — |
 | `flags` | bit0 `ENG_ON` / bit1 `Launch` / bit2 クランキング / bit3 `mapOutOfRange` | — |
-| `inj_end` | `calculatedINJ_END_CA`（proto=4 で追加） | CA |
 
 - **タブ区切りを保っている**のは、`send_map.py` が「タブを含む行＝テレメトリ」として
   読み飛ばす実装だから。  
   この書式なら CLI を 1 行も変えずに共存できる。
-- **`inj_end` を末尾に足した**のは、旧 GUI / 旧 CLI のパーサが先頭 10 個だけを読む実装だから。  
-  新ファーム × 旧ツールはそのまま動き、旧ファーム × 新 GUI ではこの欄が無いものとして「—」を表示する。  
+- **MAP 由来の 3 値（`inj` / `ign` / `inj_end`）を隣り合わせに並べた**（proto=5 で `inj_end` を末尾から移動）。  
+  列数は proto=4 と同じ 11 なので **旧ツールとは互換がない**（`spd` 以降が黙って 1 列ずれる）。  
+  Web GUI / `map_gui.py` は `VER` の `proto` を見て、5 未満のファームには `TELEM ON` を送らず、2Hz の旧形式表示にフォールバックする。  
+  旧ツール × 新ファームは表示が壊れるので、ツールも同時に更新すること
   `ign` の隣に差し込むと `row` と `flags` が黙ってずれるので、順序は変えない。
 - `calculatedINJ_END_CA` は **MAP 範囲外でもゼロクリアされない。**  
   （`updateEngineMap()` は `inj`/`ign` だけ 0 にする）  
@@ -521,10 +525,14 @@ AGTimer: [`AGTimer.init(period_us, callback)`](lib/AGTimer_R4_Library/src/AGTime
 
 ## ログ / 出力
 
-| ポート | 形式 | 周期 | フィールド |
-| --- | --- | --- | --- |
-| `Serial1` (HW UART) | CSV | **10Hz (100ms)** | RPM, INJ(ms), IGN_CA, speed, distance, fuel(ml), km/L, worktime |
-| `Serial` (USB CDC) | タブ区切り | 2Hz (500ms) | 上記 + Ne_deg |
+| ポート | 形式 | 周期 | フィールド | 出力先 |
+| --- | --- | --- | --- | --- |
+| `Serial1` (HW UART) | CSV + XORチェックサム | **10Hz (100ms)** | RPM, INJ(ms), IGN_CA, INJ_END(CA), speed, distance, fuel(ml), km/L, worktime | ロガー (ESP32) <BR>https://github.com/todateman/Chibi-T_Furoshiki_Logger |
+| `Serial` (USB CDC) | タブ区切り | 2Hz (500ms) | 上記 + Ne_deg | PC (USB) |
+
+`Serial1` の行末は `*XX`（XX = 先頭から `*` 直前までの全バイトのXOR、16進2桁）。  
+ロガーは不一致の行を捨てる。`INJ_END(CA)` は MAP 範囲外では前回値が残る。  
+INJ_END を IGN_CA の直後に挿入したため、**EFI とロガーは必ず同時に更新する**（旧形式とは非互換）。
 
 speed は 0.1km/h 分解能。停止時は最終パルス経過時間で減衰し、約8秒後に 0.0 へ。
 

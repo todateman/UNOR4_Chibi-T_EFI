@@ -17,11 +17,15 @@ import { MapTableView } from './ui/table.js';
 
 const $ = (sel) => document.querySelector(sel);
 
-// ライブ適用の安全装置。1操作あたりの変化量の上限と、自動解除までの無操作時間。
+// ライブ適用の自動解除までの無操作時間。1操作あたりの変化量の上限は
+// model 側の FIELD_META[*].liveMaxStep にある（テストで固定できるように移した）。
 const LIVE_ARM_MS = 60000;
-const LIVE_MAX_INJ_STEP = 10;   // x0.1ms = 1.0ms
-const LIVE_MAX_IGN_STEP = 5;    // CA
-const LIVE_MAX_END_STEP = 30;   // CA
+
+/** 「噴射 ±1.0ms / 進角 ±5CA / 噴射終了 ±30CA」のような上限の一覧を作る。 */
+const liveStepLimits = () => M.EDIT_FIELDS.map((f) => {
+  const m = M.FIELD_META[f];
+  return `${m.short} ±${m.toDisplay(m.liveMaxStep).toFixed(m.digits)}${m.unit}`;
+}).join(' / ');
 
 const state = {
   transport: null,
@@ -48,8 +52,7 @@ const state = {
   log: [],
 };
 
-let chartInj = null;
-let chartIgn = null;
+let charts = [];       // { field, chart } を EDIT_FIELDS ぶん
 let table = null;
 
 // -----------------------------------------------------------------------------
@@ -405,14 +408,10 @@ async function maybeLiveApply() {
       if (!d.changedRows.length) continue;   // 送るものがない
       state.liveArmedUntil = Date.now() + LIVE_ARM_MS;
 
-      const tooBig = d.changedRows.find((i) => (
-        Math.abs(state.rows[i].inj - state.deviceRows[i].inj) > LIVE_MAX_INJ_STEP
-        || Math.abs(state.rows[i].ign - state.deviceRows[i].ign) > LIVE_MAX_IGN_STEP
-        || Math.abs(state.rows[i].end - state.deviceRows[i].end) > LIVE_MAX_END_STEP));
-      if (tooBig !== undefined) {
-        say(`${state.rows[tooBig].rpm} rpm の変化量が大きすぎます`
-          + `（1回のライブ反映は噴射 ±${LIVE_MAX_INJ_STEP / 10}ms / 進角 ±${LIVE_MAX_IGN_STEP}CA / `
-          + `噴射終了 ±${LIVE_MAX_END_STEP}CA まで）。`
+      const tooBig = M.liveStepViolation(state.deviceRows, state.rows, d.changedRows);
+      if (tooBig) {
+        say(`${state.rows[tooBig.index].rpm} rpm の変化量が大きすぎます`
+          + `（1回のライブ反映は ${liveStepLimits()} まで）。`
           + '「変更を送信」から明示的に反映してください。', 'warn');
         return;
       }
@@ -535,6 +534,9 @@ function render() {
   $('#v-rpm').textContent = t ? t.rpm : '—';
   $('#v-inj').textContent = t ? (t.inj01 / 10).toFixed(1) : '—';
   $('#v-ign').textContent = t ? t.ign : '—';
+  // 噴射終了角は proto>=4 のファームだけが載せてくる。MAP外(row=255)のときは
+  // ファームが前回値を持ち回っているだけなので出さない。
+  $('#v-end').textContent = (t && t.end !== null && t.row !== 255) ? t.end : '—';
   $('#v-spd').textContent = t ? (t.spd01 / 10).toFixed(1) : '—';
   $('#v-row').textContent = t ? (t.row === 255 ? 'MAP外' : `#${t.row + 1}`) : '—';
   $('#cut-badge').hidden = !(t && (t.flags & FLAG.OUT_OF_RANGE));
@@ -550,8 +552,10 @@ function render() {
     showDevice: $('#opt-device').checked,
     showDwell: $('#opt-dwell').checked,
   };
-  chartInj.set(chartState);
-  chartIgn.set(chartState);
+  // hidden を外すのは set() より先。rect が 0 のままだと MapChart.render() が
+  // 早期 return して、再表示した直後に真っ白な canvas が残る。
+  $('#panel-end').hidden = !$('#opt-end').checked;
+  charts.forEach(({ chart }) => chart.set(chartState));
 
   // テーブル
   table.set({
@@ -614,8 +618,10 @@ function render() {
 // 起動
 // -----------------------------------------------------------------------------
 function wire() {
-  chartInj = new MapChart($('#chart-inj'), 'inj', chartHandlers('inj'));
-  chartIgn = new MapChart($('#chart-ign'), 'ign', chartHandlers('ign'));
+  charts = M.EDIT_FIELDS.map((field) => ({
+    field,
+    chart: new MapChart($(`#chart-${field}`), field, chartHandlers(field)),
+  }));
   table = new MapTableView($('#table'), {
     onCommitStart: commitBefore,
     onEdit: (i, field, value) => {
@@ -686,7 +692,8 @@ function wire() {
     if (e.key === 'y') { e.preventDefault(); $('#btn-redo').click(); }
   });
 
-  const field = () => ($('#field-ign').checked ? 'ign' : 'inj');
+  // ラジオを value 駆動にして、列が増えても二択の三項演算子を書かずに済むようにする
+  const field = () => (document.querySelector('input[name="field"]:checked')?.value ?? 'inj');
   $('#btn-plus5').addEventListener('click', () => editOp((r, i) => M.trimRatio(r, i, field(), 0.05)));
   $('#btn-minus5').addEventListener('click', () => editOp((r, i) => M.trimRatio(r, i, field(), -0.05)));
   $('#btn-plus1').addEventListener('click', () => editOp((r, i) => M.trimDelta(r, i, field(), 1)));
@@ -721,6 +728,7 @@ function wire() {
 
   $('#opt-device').addEventListener('change', render);
   $('#opt-dwell').addEventListener('change', render);
+  $('#opt-end').addEventListener('change', render);
   $('#btn-resetdwell').addEventListener('click', () => {
     state.dwell.reset();
     render();

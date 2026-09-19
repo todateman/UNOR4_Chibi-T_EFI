@@ -529,9 +529,11 @@ void statusTask(void *pvParameters) {
     }
 
     // ── 機械可読テレメトリ（TELEM ON のときだけ。既定OFF）────────────────
-    // 書式: T\t<seq>\t<ms>\t<rpm>\t<inj01>\t<ign>\t<spd01>\t<ne>\t<row>\t<flags>
+    // 書式: T\t<seq>\t<ms>\t<rpm>\t<inj01>\t<ign>\t<spd01>\t<ne>\t<row>\t<flags>\t<inj_end>
     // タブ区切りを保つのは、tools/send_map.py が「タブを含む行=テレメトリ」として
     // 読み飛ばす実装になっているため（CLIを無改造のまま使える）。
+    // inj_end（proto=4で追加）を末尾に足したのは、旧GUI/旧CLIのパーサが先頭10個だけを
+    // 読む実装だから。ign の隣に差し込むと row と flags が黙ってずれて危険。
     if (SerialUSBEnabled && mapConsoleTelemetryStream() && !mapConsoleTelemetryMuted()) {
       if (++tel_cnt >= mapConsoleTelemetryDivisor()) {
         tel_cnt = 0;
@@ -544,7 +546,7 @@ void statusTask(void *pvParameters) {
                         | (startState == LOW ? 0x04 : 0)
                         | (mapOutOfRange ? 0x08 : 0);
           int len = snprintf(telBuf, sizeof(telBuf),
-            "T\t%u\t%lu\t%u\t%u\t%d\t%lu\t%d\t%u\t%u\n",
+            "T\t%u\t%lu\t%u\t%u\t%d\t%lu\t%d\t%u\t%u\t%d\n",
             (unsigned)(++telSeq),          // 連番（取りこぼし検出）
             (unsigned long)millis(),       // 時刻 [ms]
             (unsigned)tachoRpm,            // 回転数 [rpm]
@@ -553,7 +555,8 @@ void statusTask(void *pvParameters) {
             speed,                         // 車速 [x0.1km/h]
             (int)Ne_deg,                   // クランク角 [CA]
             (unsigned)activeMapRow,        // 採用中のMAP行（255=MAP未使用）
-            (unsigned)flags);
+            (unsigned)flags,
+            (int)calculatedINJ_END_CA);    // 噴射終了角 [CA]（MAP外では前回値が残る）
           // テレメトリよりコマンド応答性を優先する。取れなければ捨てる
           // （落ちた分はseqの飛びでGUI側が検出できる）。
           if (len > 0 && mapConsoleUsbLock(pdMS_TO_TICKS(5))) {

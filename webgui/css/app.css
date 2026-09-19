@@ -123,9 +123,25 @@ main {
 }
 @media (max-width: 1100px) {
   main { grid-template-columns: minmax(0, 1fr); }
+  /* 1カラムになると表はグラフの下なので、貼り付かせるとかえって邪魔になる */
+  .table { position: static; }
 }
 
+/* グラフは縦積みではなく横に並べる。縦積みだと下のグラフを触るためにスクロールが要り、
+   右カラムのMAPテーブルが画面外へ流れて「調整しながら表が見えない」状態になっていた。
+   auto-fit なので、噴射終了角のグラフを出すと幅に応じて3枚横並び／2+1の折り返しになる。 */
 .charts { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+/* auto-fit は「中身のないトラック」を畳むので、パネルが2枚なら2列・3枚なら3列に
+   なり、幅が足りなければ勝手に折り返す。オプション行をこのグリッドの中に入れると
+   全トラックに跨がってトラックが空でなくなり、畳まれなくなるので外に出してある。 */
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -134,21 +150,61 @@ main {
   display: flex;
   flex-direction: column;
   min-height: 220px;
-  flex: 1;
 }
+/* display:flex が hidden 属性を上書きしてしまうので、明示的に消す。 */
+.panel[hidden] { display: none; }
 .panel-head {
   display: flex;
   justify-content: space-between;
   font-size: 12px;
   margin-bottom: 4px;
 }
-canvas { width: 100%; flex: 1; min-height: 190px; touch-action: none; }
-.opts { display: flex; gap: 14px; align-items: center; font-size: 12px; color: var(--muted); }
+/* canvas は width/height 属性ぶんの固有アスペクト比を持ち、MapChart.render() が
+   実測サイズをその属性へ書き戻す。canvas を素のフロー内に置くと、これがループになる:
+   グラフの表示を切り替えて列幅が変わる → 固有比率から算出された高さで grid の auto 行
+   が伸びる → 伸びた高さが属性へ書き戻って比率が更新される → 元の幅に戻しても縮まない。
+   （実測: 噴射終了角の表示を ON→OFF するたびに 591px → 906px と伸び続けた）
+   高さを決めるのは箱の側だけにして、canvas は絶対配置でその箱を埋める。
+   絶対配置なら親の内容高さに寄与しないので、書き戻しがレイアウトへ還流しない。 */
+.canvas-box {
+  position: relative;
+  flex: 1;
+  min-height: 190px;
+  min-width: 0;
+}
+canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+.opts {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--muted);
+}
 
-.side { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.side {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  align-self: start;              /* stretch されると中の sticky が効かない */
+}
 
 /* -- テーブル -------------------------------------------------------------- */
+/* グラフを触っている間もMAPテーブルが見えているように、ページをスクロールしても
+   表だけは上に貼り付かせる（下の編集ツールと警告は普通に流れる）。
+   右カラムごと sticky にすると、縦の短い画面ではカラム自体がビューポートと同じ
+   高さになって貼り付く余地が無くなるので、表そのものを sticky にしている。 */
 .table {
+  position: sticky;
+  top: 8px;
+  z-index: 2;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;

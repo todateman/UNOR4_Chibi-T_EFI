@@ -40,8 +40,11 @@ export const FLAG = {
  * テレメトリ行をパースする。値はファームの生の整数のまま保持し、
  * 表示単位への換算は描画側で行う（丸め誤差の混入源を1箇所に閉じ込める）。
  *
- * 新: T\t<seq>\t<ms>\t<rpm>\t<inj01>\t<ign>\t<spd01>\t<ne>\t<row>\t<flags>
+ * 新: T\t<seq>\t<ms>\t<rpm>\t<inj01>\t<ign>\t<spd01>\t<ne>\t<row>\t<flags>[\t<inj_end>]
  * 旧: <rpm>\t<inj_ms>\t<ign>\t<speed>\t<dist>\t<gas>\t<fuel>\t<work>\t<ne>
+ *
+ * inj_end は proto=4 で末尾に追加された。無ければ end=null になるだけなので、
+ * proto=3 のファームもそのまま読める（表示側が「—」を出す）。
  */
 export function parseTelemetry(text) {
   const p = text.split('\t');
@@ -49,9 +52,12 @@ export function parseTelemetry(text) {
     if (p.length < 10) return null;
     const v = p.slice(1, 10).map(Number);
     if (v.some(Number.isNaN)) return null;
+    const end = p.length >= 11 ? Number(p[10]) : null;
     return {
       seq: v[0], ms: v[1], rpm: v[2], inj01: v[3], ign: v[4],
-      spd01: v[5], ne: v[6], row: v[7], flags: v[8], legacy: false,
+      spd01: v[5], ne: v[6], row: v[7], flags: v[8],
+      end: Number.isNaN(end) ? null : end,
+      legacy: false,
     };
   }
   if (p.length === 9) {
@@ -61,10 +67,10 @@ export function parseTelemetry(text) {
     const spd = Number(p[3]);
     const ne = Number(p[8]);
     if ([rpm, inj, ign, spd, ne].some(Number.isNaN)) return null;
-    // 旧書式は seq / row / flags を持たない
+    // 旧書式は seq / row / flags / inj_end を持たない
     return {
       seq: 0, ms: 0, rpm, inj01: Math.round(inj * 10), ign,
-      spd01: Math.round(spd * 10), ne, row: 255, flags: 0, legacy: true,
+      spd01: Math.round(spd * 10), ne, row: 255, flags: 0, end: null, legacy: true,
     };
   }
   return null;

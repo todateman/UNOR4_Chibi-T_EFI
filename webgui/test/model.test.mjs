@@ -12,7 +12,9 @@ import { dirname, join } from 'node:path';
 import {
   crc16, validate, cellErrors, diff, lint, rowForRpm,
   trimRatio, trimDelta, interpolate, smooth, insertRow, removeRows,
-  MAP_MAX_ENTRIES, TACHO_RPM_MAX,
+  angleDelta, injectionWindow, liveStepViolation, clampField,
+  MAP_MAX_ENTRIES, TACHO_RPM_MAX, CYCLE_CA, FIELD_META, EDIT_FIELDS,
+  MAP_INJ_END_CA_MAX,
 } from '../js/model/maptable.js';
 import { parseCsv, formatCsv, telemetryCsv, parseTelemetryCsv } from '../js/model/csv.js';
 import { History } from '../js/model/history.js';
@@ -239,6 +241,177 @@ test('リンターが跳びを警告する', () => {
   const issues = lint(rows);
   assert.ok(issues.some((i) => i.text.includes('噴射時間が前行から')));
   assert.ok(issues.some((i) => i.text.includes('進角が前行から')));
+});
+
+// -----------------------------------------------------------------------------
+// 噴射終了角（end）。720CAで周回する角度であることが、他の2列との決定的な違い。
+// -----------------------------------------------------------------------------
+test('angleDelta が720CAで周回する', () => {
+  assert.equal(angleDelta(680, 20), -60);    // 680CAと20CAは60CAしか離れていない
+  assert.equal(angleDelta(20, 680), 60);
+  assert.equal(angleDelta(0, 0), 0);
+  assert.equal(angleDelta(400, 0), -320);
+  assert.equal(angleDelta(0, 400), 320);
+  // ちょうど半周は畳まない（どちら回りでも同じ距離）
+  assert.equal(Math.abs(angleDelta(360, 0)), 360);
+});
+
+test('injectionWindow がファームの式と一致する', () => {
+  // durationCa = inj * 100[us] * 360 / tachoWidth, tachoWidth = 60000000/rpm
+  const a = injectionWindow({ rpm: 2000, inj: 44, ign: 21, end: 680 });
+  assert.ok(Math.abs(a.durationCa - 52.8) < 1e-9);
+  assert.ok(Math.abs(a.start - 627.2) < 1e-9);
+
+  // 0CA跨ぎはファームと同じく +720 して表す
+  const b = injectionWindow({ rpm: 800, inj: 80, ign: 0, end: 20 });
+  assert.ok(Math.abs(b.durationCa - 38.4) < 1e-9);
+  assert.ok(Math.abs(b.start - 701.6) < 1e-9);
+});
+
+test('リンターが同梱MAPの 0→20→680 を跳びとみなさない', () => {
+  // 既定MAPは低rpm域(0/20)と走行域(680)で大きく跳ぶが、周回距離では60CAしかない。
+  // 素の差で判定すると全行が警告になるので、誤警告ゼロを回帰テストで固定する。
+  for (const name of ['RPM.CSV', 'RPM_2026SUZUKA.CSV']) {
+    const issues = lint(readMap(name));
+    const endIssues = issues.filter((i) => i.text.includes('噴射終了角') || i.text.includes('360CA'));
+    assert.deepEqual(endIssues, [], `${name} で噴射終了角の警告が出ている`);
+  }
+});
+
+test('リンターが噴射終了角の大きな跳びを警告する', () => {
+  const rows = [
+    { rpm: 1000, inj: 40, ign: 10, end: 680 },
+    { rpm: 2000, inj: 40, ign: 10, end: 400 },   // 周回距離 280CA
+  ];
+  const hit = lint(rows).find((i) => i.text.includes('噴射終了角が前行から'));
+  assert.ok(hit, '噴射終了角の跳び警告が出るはず');
+  assert.equal(hit.level, 'warn');
+  assert.ok(hit.text.includes('-280'));
+});
+
+test('リンターが360CA跨ぎの噴射を警告する', () => {
+  // 6000rpm で 10.0ms = 360CA。end=400 なら開始40CA→終了400CAで360CAを跨ぐ。
+  const rows = [
+    { rpm: 3000, inj: 40, ign: 10, end: 680 },
+    { rpm: 6000, inj: 100, ign: 30, end: 400 },
+  ];
+  const hit = lint(rows).find((i) => i.text.includes('360CAを跨ぎます'));
+  assert.ok(hit, '360CA跨ぎの警告が出るはず');
+  assert.equal(hit.level, 'warn');
+  assert.equal(hit.row, 1);
+});
+
+test('リンターが1サイクルを超える噴射をエラーにする', () => {
+  // 6000rpm で 25.5ms = 918CA > 720CA
+  const rows = [{ rpm: 6000, inj: 255, ign: 30, end: 680 }];
+  const hit = lint(rows).find((i) => i.text.includes('噴射が閉じません'));
+  assert.ok(hit, '1サイクル超過のエラーが出るはず');
+  assert.equal(hit.level, 'error');
+});
+
+test('補間が噴射終了角の0CA跨ぎを短い側で回る', () => {
+  const rows = [
+    { rpm: 1000, inj: 40, ign: 10, end: 680 },
+    { rpm: 2000, inj: 40, ign: 10, end: 0 },
+    { rpm: 3000, inj: 40, ign: 10, end: 20 },
+  ];
+  // 680 → 20 の中点は、素の線形なら350。周回を考えれば710。
+  assert.equal(interpolate(rows, [0, 1, 2], 'end')[1].end, 710);
+  // 周回しない列はこれまでどおり素の線形
+  const ign = [
+    { rpm: 1000, inj: 40, ign: 0, end: 680 },
+    { rpm: 2000, inj: 40, ign: 99, end: 680 },
+    { rpm: 3000, inj: 40, ign: 40, end: 680 },
+  ];
+  assert.equal(interpolate(ign, [0, 1, 2], 'ign')[1].ign, 20);
+});
+
+test('平滑化が噴射終了角の0CA跨ぎを短い側で回る', () => {
+  const rows = [
+    { rpm: 1000, inj: 40, ign: 10, end: 700 },
+    { rpm: 2000, inj: 40, ign: 10, end: 0 },
+    { rpm: 3000, inj: 40, ign: 10, end: 20 },
+  ];
+  // 0 + ((700-0 → -20) + (20-0 → +20))/4 = 0 → 周回すると両隣が打ち消し合う
+  assert.equal(smooth(rows, [0, 1, 2], 'end')[1].end, 0);
+});
+
+test('clampField がメタ駆動で効き、周回する列でも wrap しない', () => {
+  for (const f of EDIT_FIELDS) {
+    const m = FIELD_META[f];
+    assert.equal(clampField(f, m.max + 1), m.max, `${f} の上限クランプ`);
+    assert.equal(clampField(f, -1), m.min, `${f} の下限クランプ`);
+  }
+  // 打ち間違いが黙って別の位相にならないこと（800 → 80 にはならない）
+  assert.equal(clampField('end', 800), MAP_INJ_END_CA_MAX);
+  assert.equal(FIELD_META.end.cyclic, CYCLE_CA);
+});
+
+test('liveStepViolation がライブ適用の変化量上限を守る', () => {
+  const dev = [{ rpm: 2000, inj: 44, ign: 21, end: 680 }];
+  const edit = (patch) => [{ ...dev[0], ...patch }];
+
+  assert.equal(liveStepViolation(dev, edit({ end: 680 + 30 }), [0]), null);
+  assert.equal(liveStepViolation(dev, edit({ end: 680 + 31 }), [0]).field, 'end');
+  assert.equal(liveStepViolation(dev, edit({ inj: 44 + 10 }), [0]), null);
+  assert.equal(liveStepViolation(dev, edit({ inj: 44 + 11 }), [0]).field, 'inj');
+  assert.equal(liveStepViolation(dev, edit({ ign: 21 + 5 }), [0]), null);
+  assert.equal(liveStepViolation(dev, edit({ ign: 21 + 6 }), [0]).field, 'ign');
+
+  // 680 → 20 は生の差だと660だが、クランク角では60CAの変更
+  assert.equal(liveStepViolation(dev, edit({ end: 20 }), [0]).delta, 60);
+});
+
+test('差分表示も噴射終了角は周回距離で出す', () => {
+  const dev = [{ rpm: 2000, inj: 44, ign: 21, end: 20 }];
+  const edit = [{ rpm: 2000, inj: 44, ign: 21, end: 717 }];
+  const d = diff(dev, edit);
+  assert.equal(d.cells['0:end'], -23);   // +697 ではない
+  assert.deepEqual(d.changedRows, [0]);
+  // 周回しない列は従来どおり素の差
+  assert.equal(diff(dev, [{ ...dev[0], inj: 50 }]).cells['0:inj'], 6);
+});
+
+test('cellErrors が噴射終了角の範囲外を特定する', () => {
+  const rows = [{ rpm: 2000, inj: 44, ign: 21, end: MAP_INJ_END_CA_MAX + 1 }];
+  assert.ok(cellErrors(rows)['0:end']);
+  assert.equal(validate(rows), 'INJ_END_CA_OUT_OF_RANGE');
+});
+
+test('テレメトリの噴射終了角は末尾追記なので旧ファームとも互換', () => {
+  // proto=4: 11列目に噴射終了角
+  const now = parseTelemetry('T\t12\t34567\t2480\t44\t20\t183\t213\t5\t9\t680');
+  assert.equal(now.end, 680);
+  assert.equal(now.row, 5);      // 追記で row/flags がずれていないこと
+  assert.equal(now.flags, 9);
+
+  // proto<=3: 10列のまま。end は null になるだけで他は従来どおり
+  const old = parseTelemetry('T\t12\t34567\t2480\t44\t20\t183\t213\t5\t9');
+  assert.equal(old.end, null);
+  assert.equal(old.row, 5);
+  assert.equal(old.flags, 9);
+
+  // 旧2Hz書式も end を持たない
+  assert.equal(parseTelemetry('1560\t4.0\t15\t18.4\t0\t0.0\t0.0\t12\t213').end, null);
+});
+
+test('テレメトリログCSVが噴射終了角を往復し、旧ログも読める', () => {
+  const samples = [
+    parseTelemetry('T\t1\t100\t2480\t44\t20\t183\t213\t5\t1\t680'),
+    parseTelemetry('T\t2\t200\t2480\t44\t20\t183\t213\t5\t1'),   // end 無し
+  ];
+  const back = parseTelemetryCsv(telemetryCsv(samples));
+  assert.equal(back.length, 2);
+  assert.equal(back[0].end, 680);
+  assert.equal(back[1].end, null);     // 空欄は0ではなくnullに戻す
+
+  // 11列目がそもそも無い旧ログ
+  const legacyCsv = 'seq,ms,rpm,inj_ms,ign_ca,speed_kmh,ne_deg,map_row,eng_on,out_of_range\n'
+    + '1,100,2480,4.4,20,18.3,213,5,1,0\n';
+  const legacy = parseTelemetryCsv(legacyCsv);
+  assert.equal(legacy.length, 1);
+  assert.equal(legacy[0].end, null);
+  assert.equal(legacy[0].rpm, 2480);
 });
 
 // -----------------------------------------------------------------------------

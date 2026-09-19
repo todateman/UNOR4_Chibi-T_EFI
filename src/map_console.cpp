@@ -16,8 +16,10 @@
 #define TELEM_DIV_MAX          20
 #define TELEM_BASE_MS          100   // = main.cpp の STATUS_TASK_DELAY_MS
 
-#define FW_VERSION             "1.2.0"
-#define PROTO_VERSION          3   // v3: MAP列を4列化（rpm,inj,ign,inj_end_ca）
+#define FW_VERSION             "1.3.0"
+// v3: MAP列を4列化（rpm,inj,ign,inj_end_ca）
+// v4: テレメトリT行の末尾に inj_end を追加（先頭10個だけ読む旧パーサとは互換）
+#define PROTO_VERSION          4
 
 // main.cpp のエンジン状態（EEPROM書き込みの安全ガードに使用）
 extern bool ENG_ON;

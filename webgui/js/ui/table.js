@@ -6,9 +6,11 @@
 //   - 現在採用中の行（ファームが報告した row。GUIの推測ではない）
 //   - 行ごとの滞在時間（背景バー）
 
-import { MAP_MAX_ENTRIES, cellErrors, clampField } from '../model/maptable.js';
+import {
+  MAP_MAX_ENTRIES, cellErrors, clampField, FIELD_META, EDIT_FIELDS,
+} from '../model/maptable.js';
 
-const FIELDS = ['rpm', 'inj', 'ign', 'end'];
+const FIELDS = ['rpm', ...EDIT_FIELDS];
 
 export class MapTableView {
   /**
@@ -69,10 +71,7 @@ export class MapTableView {
     const head = `
       <div class="tr th">
         <span class="c-idx">#</span>
-        <span class="c-num">RPM</span>
-        <span class="c-num">噴射 ms</span>
-        <span class="c-num">進角 CA</span>
-        <span class="c-num">噴射終了 CA</span>
+        ${FIELDS.map((f) => `<span class="c-num">${FIELD_META[f].header}</span>`).join('')}
         <span class="c-diff">差分</span>
       </div>`;
 
@@ -95,13 +94,18 @@ export class MapTableView {
                    >${text}</span>`;
       };
 
-      const dInj = diff.cells[`${i}:inj`];
-      const dIgn = diff.cells[`${i}:ign`];
-      const dEnd = diff.cells[`${i}:end`];
-      const parts = [];
-      if (dInj) parts.push(`<b class="${dInj > 0 ? 'up' : 'down'}">噴射 ${dInj > 0 ? '+' : ''}${(dInj / 10).toFixed(1)}</b>`);
-      if (dIgn) parts.push(`<b class="${dIgn > 0 ? 'up' : 'down'}">進角 ${dIgn > 0 ? '+' : ''}${dIgn}</b>`);
-      if (dEnd) parts.push(`<b class="${dEnd > 0 ? 'up' : 'down'}">終了 ${dEnd > 0 ? '+' : ''}${dEnd}</b>`);
+      const numCell = (f) => {
+        const m = FIELD_META[f];
+        return cell(f, m.toDisplay(r[f]).toFixed(m.digits));
+      };
+
+      const parts = EDIT_FIELDS.flatMap((f) => {
+        const d = diff.cells[`${i}:${f}`];
+        if (!d) return [];
+        const m = FIELD_META[f];
+        return [`<b class="${d > 0 ? 'up' : 'down'}">${m.short} `
+          + `${d > 0 ? '+' : ''}${m.toDisplay(d).toFixed(m.digits)}</b>`];
+      });
       const diffText = diff.breakpointsMatch
         ? (parts.join(' ') || '<span class="dim">·</span>')
         : '<span class="dim">—</span>';
@@ -109,10 +113,7 @@ export class MapTableView {
       return `
         <div class="${cls}" data-row="${i}" style="--heat:${heat.toFixed(3)}">
           <span class="c-idx">${i + 1}</span>
-          ${cell('rpm', r.rpm)}
-          ${cell('inj', (r.inj / 10).toFixed(1))}
-          ${cell('ign', r.ign)}
-          ${cell('end', r.end)}
+          ${FIELDS.map(numCell).join('')}
           <span class="c-diff">${diffText}</span>
         </div>`;
     }).join('');
@@ -146,8 +147,8 @@ export class MapTableView {
     const raw = el.textContent.trim();
     const n = Number(raw);
     if (raw === '' || Number.isNaN(n)) { this.render(); return; }
-    // 噴射だけ表示がmsなので、内部のx0.1msへ戻す
-    const value = clampField(field, field === 'inj' ? Math.round(n * 10) : Math.round(n));
+    // 噴射だけ表示がmsなので、fromDisplay が内部のx0.1msへ戻す
+    const value = clampField(field, FIELD_META[field].fromDisplay(n));
     if (value === this.state.rows[i][field]) { this.render(); return; }
     if (this.h.onEdit) this.h.onEdit(i, field, value, true);
   }

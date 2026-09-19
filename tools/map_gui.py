@@ -88,7 +88,7 @@ class Bridge:
         d = {
             "seq": s.seq, "ms": s.ms, "rpm": s.rpm, "inj01": s.inj01,
             "ign": s.ign, "spd01": s.spd01, "ne": s.ne, "row": s.row,
-            "flags": s.flags, "legacy": s.legacy,
+            "flags": s.flags, "end": s.end, "legacy": s.legacy,
         }
         self.last_telemetry = d
         self._publish("telemetry", d)

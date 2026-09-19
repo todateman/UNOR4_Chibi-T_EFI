@@ -1,14 +1,17 @@
 // MAPの階段グラフ（Canvas2D）。外部ライブラリは使わない。
 //
-// 描くのは最大24点の1次元階段が2枚だけなので、チャートライブラリを持ち込むより
+// 描くのは最大24点の1次元階段が3枚だけなので、チャートライブラリを持ち込むより
 // 自前で描く方が、点ドラッグ編集・滞在ヒートマップ・実機MAPの重ね描きといった
 // このアプリ固有の要件に対して素直になる。ピットではネットが無いのでCDNも使えない。
 //
 // 階段の形はファームの参照ロジックに合わせる:
 //   「最初に tachoRpm < e[i].rpm となる行 i を採用」
 // つまり行 i の値は [rows[i-1].rpm, rows[i].rpm) の区間で有効。
+//
+// 縦軸の上限・単位・表示換算・目盛数は model の FIELD_META から引く。以前は
+// `field === 'inj' ? A : B` の二値前提が各所に散っていて、列を1本増やせなかった。
 
-import { MAP_INJ_MAX, MAP_IGN_CA_MAX, TACHO_RPM_MAX } from '../model/maptable.js';
+import { FIELD_META, clampField, TACHO_RPM_MAX } from '../model/maptable.js';
 
 const PAD = { left: 52, right: 14, top: 14, bottom: 26 };
 const HIT_RADIUS = 12;
@@ -21,13 +24,15 @@ const css = (el, name, fallback) => {
 export class MapChart {
   /**
    * @param {HTMLCanvasElement} canvas
-   * @param {'inj'|'ign'} field
+   * @param {'inj'|'ign'|'end'} field
    * @param {{onDragStart:Function, onDrag:Function, onDragEnd:Function,
    *          onSelect:Function}} handlers
    */
   constructor(canvas, field, handlers = {}) {
     this.canvas = canvas;
     this.field = field;
+    this.meta = FIELD_META[field];
+    this.axis = this.meta.chart;
     this.h = handlers;
     this.state = {
       rows: [], deviceRows: [], selection: new Set(),
@@ -38,12 +43,12 @@ export class MapChart {
     this._bind();
   }
 
-  get max() { return this.field === 'inj' ? MAP_INJ_MAX : MAP_IGN_CA_MAX; }
+  get max() { return this.meta.max; }
 
   /** 表示単位へ換算する（噴射は x0.1ms → ms）。 */
-  toDisplay(v) { return this.field === 'inj' ? v / 10 : v; }
+  toDisplay(v) { return this.meta.toDisplay(v); }
 
-  get unit() { return this.field === 'inj' ? 'ms' : 'CA'; }
+  get unit() { return this.meta.unit; }
 
   set(state) {
     Object.assign(this.state, state);
@@ -139,7 +144,7 @@ export class MapChart {
       return;
     }
     this._drag.moved = true;
-    const value = Math.max(0, Math.min(this.max, Math.round(this._invY(p.y))));
+    const value = clampField(this.field, this._invY(p.y));
     if (this.h.onDrag) this.h.onDrag(this._drag.index, this.field, value);
   }
 
@@ -171,6 +176,7 @@ export class MapChart {
       edit: css(c, '--accent', '#4da3ff'),
       device: css(c, '--ghost', '#5c6773'),
       danger: css(c, '--danger', '#ff5c5c'),
+      warn: css(c, '--warn', '#ffb84d'),
       live: css(c, '--live', '#ffd24d'),
       heat: css(c, '--heat', '#4da3ff'),
       sel: css(c, '--select', '#ffffff'),
@@ -179,6 +185,7 @@ export class MapChart {
     this._drawDanger(g, r, col);
     if (this.state.showDwell) this._drawDwell(g, r, col);
     this._drawGrid(g, r, col);
+    this._drawGuides(g, r, col);
     if (this.state.showDevice && this.state.deviceRows.length) {
       this._drawSteps(g, this.state.deviceRows, col.device, 1.5, true);
     }
@@ -201,7 +208,9 @@ export class MapChart {
       g.fillStyle = col.danger;
       g.font = '10px ui-monospace, monospace';
       g.textAlign = 'left';
-      g.fillText('噴射・点火停止', xCut + 4, r.y0 + 11);
+      // グラフを横に並べると帯が狭くなる。入らないなら書かない（赤帯だけで伝わる）
+      const label = '噴射・点火停止';
+      if (g.measureText(label).width + 8 <= r.x1 - xCut) g.fillText(label, xCut + 4, r.y0 + 11);
     }
     const xRev = this._sx(TACHO_RPM_MAX);
     if (xRev >= r.x0 && xRev <= r.x1) {
@@ -213,6 +222,34 @@ export class MapChart {
       g.lineTo(xRev, r.y1);
       g.stroke();
       g.setLineDash([]);
+    }
+  }
+
+  /**
+   * 縦軸上の意味のある高さに横線を引く。
+   * 噴射終了角の360CAだけが今のところ該当する（ファームがそこで噴射を強制終了する）。
+   */
+  _drawGuides(g, r, col) {
+    const guides = this.axis.guides;
+    if (!guides) return;
+    g.font = '10px ui-monospace, monospace';
+    g.textAlign = 'right';
+    g.textBaseline = 'bottom';
+    for (const gd of guides) {
+      const y = this._sy(gd.v);
+      if (y < r.y0 || y > r.y1) continue;
+      g.strokeStyle = col.warn;
+      g.globalAlpha = 0.7;
+      g.lineWidth = 1;
+      g.setLineDash([6, 4]);
+      g.beginPath();
+      g.moveTo(r.x0, y);
+      g.lineTo(r.x1, y);
+      g.stroke();
+      g.setLineDash([]);
+      g.fillStyle = col.warn;
+      g.fillText(gd.text, r.x1 - 2, y - 2);
+      g.globalAlpha = 1;
     }
   }
 
@@ -239,7 +276,7 @@ export class MapChart {
     g.lineWidth = 1;
     g.font = '10px ui-monospace, monospace';
 
-    const yTicks = this.field === 'inj' ? 5 : 6;
+    const yTicks = this.axis.yTicks;
     g.textAlign = 'right';
     g.textBaseline = 'middle';
     for (let i = 0; i <= yTicks; i += 1) {
@@ -249,7 +286,7 @@ export class MapChart {
       g.moveTo(r.x0, y);
       g.lineTo(r.x1, y);
       g.stroke();
-      g.fillText(this.toDisplay(v).toFixed(this.field === 'inj' ? 1 : 0), r.x0 - 6, y);
+      g.fillText(this.toDisplay(v).toFixed(this.meta.digits), r.x0 - 6, y);
     }
 
     g.textAlign = 'center';

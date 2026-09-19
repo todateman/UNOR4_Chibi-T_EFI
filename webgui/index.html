@@ -29,6 +29,7 @@
   <span class="kv"><label>回転数</label><b id="v-rpm">—</b><i>rpm</i></span>
   <span class="kv"><label>噴射</label><b id="v-inj">—</b><i>ms</i></span>
   <span class="kv"><label>進角</label><b id="v-ign">—</b><i>CA</i></span>
+  <span class="kv"><label>噴射終了</label><b id="v-end">—</b><i>CA</i></span>
   <span class="kv"><label>車速</label><b id="v-spd">—</b><i>km/h</i></span>
   <span class="kv"><label>採用行</label><b id="v-row">—</b></span>
   <span id="cut-badge" class="badge cut" hidden>噴射・点火停止</span>
@@ -65,23 +66,33 @@
 
 <main>
   <div class="charts">
-    <div class="panel">
-      <div class="panel-head">
-        <span>噴射時間 (ms)</span>
-        <span class="dim">点をドラッグで編集</span>
+    <div class="chart-grid">
+      <div class="panel">
+        <div class="panel-head">
+          <span>噴射時間 (ms)</span>
+          <span class="dim">点をドラッグで編集</span>
+        </div>
+        <div class="canvas-box"><canvas id="chart-inj"></canvas></div>
       </div>
-      <canvas id="chart-inj"></canvas>
-    </div>
-    <div class="panel">
-      <div class="panel-head">
-        <span>点火進角 (CA)</span>
-        <span class="dim">赤帯 = 噴射・点火が止まる領域</span>
+      <div class="panel">
+        <div class="panel-head">
+          <span>点火進角 (CA)</span>
+          <span class="dim">赤帯 = 噴射・点火が止まる領域</span>
+        </div>
+        <div class="canvas-box"><canvas id="chart-ign"></canvas></div>
       </div>
-      <canvas id="chart-ign"></canvas>
+      <div class="panel" id="panel-end" hidden>
+        <div class="panel-head">
+          <span>噴射終了角 (CA)</span>
+          <span class="dim">橙破線 = 強制終了境界</span>
+        </div>
+        <div class="canvas-box"><canvas id="chart-end"></canvas></div>
+      </div>
     </div>
     <div class="opts">
       <label><input id="opt-device" type="checkbox" checked> 実機MAPを重ねる</label>
       <label><input id="opt-dwell" type="checkbox" checked> 滞在ヒートマップ</label>
+      <label><input id="opt-end" type="checkbox"> 噴射終了角のグラフ</label>
       <button id="btn-resetdwell" type="button">滞在リセット</button>
     </div>
   </div>
@@ -91,8 +102,9 @@
 
     <div class="edit-tools">
       <div class="row">
-        <label><input type="radio" name="field" id="field-inj" checked> 噴射</label>
-        <label><input type="radio" name="field" id="field-ign"> 進角</label>
+        <label><input type="radio" name="field" value="inj" id="field-inj" checked> 噴射</label>
+        <label><input type="radio" name="field" value="ign" id="field-ign"> 進角</label>
+        <label><input type="radio" name="field" value="end" id="field-end"> 噴射終了</label>
         <span class="spacer"></span>
         <button id="btn-selall" type="button">全選択</button>
         <button id="btn-selnone" type="button">選択解除</button>
@@ -106,8 +118,11 @@
         <button id="btn-smooth" type="button">平滑化</button>
       </div>
       <p class="hint dim">
-        選択が無いときは全行が対象。「+1 段」は噴射 +0.1ms / 進角 +1CA。
+        選択が無いときは全行が対象。「+1 段」は噴射 +0.1ms / 進角 +1CA / 噴射終了 +1CA。
         表のセルでは ↑↓ で 1 段、Shift+↑↓ で 10 段動きます。
+        噴射終了角は 0〜720CA とグラフの縦軸が広く 1px ≒ 4CA なので、
+        細かい調整はドラッグより表のセルの方が確実です（角度に ±5% は意味が歪むので
+        ±1 段・線形補間を推奨。補間は 720CA の周回を考えて短い側を回ります）。
       </p>
     </div>
 

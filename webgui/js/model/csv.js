@@ -54,14 +54,18 @@ export function download(filename, text, mime = 'text/csv') {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-/** テレメトリのログをCSVにする。単位は人が読める形へ換算しておく。 */
+/**
+ * テレメトリのログをCSVにする。単位は人が読める形へ換算しておく。
+ * inj_end_ca は末尾に足す（proto<=3 のファームでは空欄になる）。
+ */
 export function telemetryCsv(samples) {
-  const head = 'seq,ms,rpm,inj_ms,ign_ca,speed_kmh,ne_deg,map_row,eng_on,out_of_range';
+  const head = 'seq,ms,rpm,inj_ms,ign_ca,speed_kmh,ne_deg,map_row,eng_on,out_of_range,inj_end_ca';
   const body = samples.map((s) => [
     s.seq, s.ms, s.rpm, (s.inj01 / 10).toFixed(1), s.ign,
     (s.spd01 / 10).toFixed(1), s.ne, s.row,
     (s.flags & 0x01) ? 1 : 0,
     (s.flags & 0x08) ? 1 : 0,
+    s.end === null || s.end === undefined ? '' : s.end,
   ].join(','));
   return [head, ...body].join('\n') + '\n';
 }
@@ -72,12 +76,16 @@ export function parseTelemetryCsv(text) {
   for (const raw of lines) {
     const line = raw.trim();
     if (!line || !/^\d/.test(line)) continue;
-    const p = line.split(',').map(Number);
-    if (p.length < 8 || p.some((n) => Number.isNaN(n))) continue;
+    const cols = line.split(',');
+    const p = cols.map(Number);
+    // 11列目(inj_end_ca)は後から足した列。無い／空欄の旧ログもそのまま読めるようにする
+    if (p.length < 8 || p.slice(0, 10).some((n) => Number.isNaN(n))) continue;
+    const end = cols.length >= 11 && cols[10].trim() !== '' ? p[10] : null;
     out.push({
       seq: p[0], ms: p[1], rpm: p[2], inj01: Math.round(p[3] * 10), ign: p[4],
       spd01: Math.round(p[5] * 10), ne: p[6], row: p[7],
       flags: (p[8] ? 0x01 : 0) | (p[9] ? 0x08 : 0),
+      end: end !== null && Number.isNaN(end) ? null : end,
       legacy: false,
     });
   }

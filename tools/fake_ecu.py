@@ -31,8 +31,8 @@ from map_protocol import (
     crc16,
 )
 
-FW_VERSION = "1.2.0"
-PROTO_VERSION = 3
+FW_VERSION = "1.3.0"
+PROTO_VERSION = 4
 LINE_MAX = 96
 TELEM_BASE_MS = 100
 
@@ -130,6 +130,7 @@ class FakeEcu:
         self._telem_div = 1
         self._telem_drop = 0
         self._seq = 0
+        self._last_end = 0
 
         self._in = ""
         self._overflow = False
@@ -164,11 +165,16 @@ class FakeEcu:
         row = self._active_row(rpm)
         out_of_range = row == 255 and self.engine_running
         inj, ign = (self.rows[row][1], self.rows[row][2]) if row != 255 else (0, 0)
+        # ファームは範囲外でも噴射終了角だけはゼロクリアしない（前回値が残る）ので、
+        # モックも同じ振る舞いにしておく。GUI側はrow=255のとき表示しない。
+        end = self.rows[row][3] if row != 255 else self._last_end
+        self._last_end = end
         flags = (0x01 if self.engine_running else 0) | (0x08 if out_of_range else 0)
         self._seq = (self._seq + 1) & 0xFFFF
         ms = int((time.monotonic() - self._t0) * 1000)
         ne = int((time.monotonic() * 360) % 720)
-        self._write(f"T\t{self._seq}\t{ms}\t{rpm}\t{inj}\t{ign}\t0\t{ne}\t{row}\t{flags}\n")
+        self._write(
+            f"T\t{self._seq}\t{ms}\t{rpm}\t{inj}\t{ign}\t0\t{ne}\t{row}\t{flags}\t{end}\n")
 
     def pump(self) -> None:
         """時間経過に応じてテレメトリを生成する。read() から呼ばれる。"""

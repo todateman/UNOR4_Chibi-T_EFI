@@ -532,6 +532,8 @@ AGTimer: [`AGTimer.init(period_us, callback)`](lib/AGTimer_R4_Library/src/AGTime
 
 `Serial1` の行末は `*XX`（XX = 先頭から `*` 直前までの全バイトのXOR、16進2桁）。  
 ロガーは不一致の行を捨てる。`INJ_END(CA)` は MAP 範囲外では前回値が残る。  
+エンジン停止中（`ENG_ON=false`: キルスイッチOFF・スタータ待機・始動失敗）は、`INJ(ms)` / `IGN_CA` / `INJ_END(CA)` を 0 で出力する。  
+ロガー側でエンジン停止状態を判別できる（USBテレメトリは MAP 参照値のままで、`flags` の bit0 が `ENG_ON`）。  
 INJ_END を IGN_CA の直後に挿入したため、**EFI とロガーは必ず同時に更新する**（旧形式とは非互換）。
 
 speed は 0.1km/h 分解能。停止時は最終パルス経過時間で減衰し、約8秒後に 0.0 へ。

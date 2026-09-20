@@ -512,15 +512,19 @@ void statusTask(void *pvParameters) {
 
     if (Serial1Enabled) {
       // newlib-nano の snprintf は %.1f 非対応のため整数演算で小数1桁を表現
-      unsigned inj10 = (unsigned)(INJ_timems * 10.0f + 0.5f);
+      // キルスイッチ等でエンジン停止中(ENG_ON=false)は、MAP由来の3値を0で出力する。
+      // calculated*はMAP参照値のままで実際の噴射・点火状態を表さないため、
+      // ロガー側で「停止中」と「MAP行の値が0」を区別できるようにする。
+      const bool engRun = ENG_ON;
+      unsigned inj10 = engRun ? (unsigned)(INJ_timems * 10.0f + 0.5f) : 0;
       unsigned gas10 = (unsigned)(gasml * 10.0f + 0.5f);
       unsigned dis10 = (unsigned)(dispergas * 10.0f + 0.5f);
       int len = snprintf(s1buf, sizeof(s1buf),
         "%u,%u.%u,%d,%d,%lu.%lu,%u,%u.%u,%u.%u,%u",
         (unsigned)tachoRpm,           // RPM
         inj10 / 10, inj10 % 10,       // INJ_timems
-        (int)calculatedIGN_CA,        // calculatedIGN_CA
-        (int)calculatedINJ_END_CA,    // 噴射終了角 [CA]（MAP外では前回値が残る）
+        engRun ? (int)calculatedIGN_CA : 0,       // calculatedIGN_CA
+        engRun ? (int)calculatedINJ_END_CA : 0,   // 噴射終了角 [CA]（MAP外では前回値が残る）
         speed / 10, speed % 10,       // speed
         (unsigned)distance,           // distance
         gas10 / 10, gas10 % 10,       // gasml

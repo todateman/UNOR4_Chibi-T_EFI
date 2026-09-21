@@ -125,7 +125,7 @@ volatile float gasml       = 0.0;         // 燃料消費量（ml）
 volatile float INJ_timems  = 0.0;         // 燃料噴射時間（ms）
 volatile float dispergas   = 0.0;         // 燃費（km/L）
 unsigned long starttime    = 0;           // エンジン始動時間（ms）
-volatile uint16_t worktime = 0;           // エンジン稼働時間（秒）
+volatile uint32_t worktime = 0;           // エンジン稼働時間（0.1秒単位）
 
 volatile float usecperdig = 1.0;          // NE_A_INの1パルスあたりの時間（us）
 
@@ -509,6 +509,7 @@ void statusTask(void *pvParameters) {
   for (;;) {
     // ── 高速パス（10Hz）──────────────────────────────────────────────────
     INJ_timems = calculatedINJ_time * 0.1f;
+    worktime = Launch ? (millis() - starttime) / 100 : 0;
 
     if (Serial1Enabled) {
       // newlib-nano の snprintf は %.1f 非対応のため整数演算で小数1桁を表現
@@ -519,8 +520,9 @@ void statusTask(void *pvParameters) {
       unsigned inj10 = engRun ? (unsigned)(INJ_timems * 10.0f + 0.5f) : 0;
       unsigned gas10 = (unsigned)(gasml * 10.0f + 0.5f);
       unsigned dis10 = (unsigned)(dispergas * 10.0f + 0.5f);
+      unsigned wt10  = (unsigned)worktime;
       int len = snprintf(s1buf, sizeof(s1buf),
-        "%u,%u.%u,%d,%d,%lu.%lu,%u,%u.%u,%u.%u,%u",
+        "%u,%u.%u,%d,%d,%lu.%lu,%u,%u.%u,%u.%u,%u.%u",
         (unsigned)tachoRpm,           // RPM
         inj10 / 10, inj10 % 10,       // INJ_timems
         engRun ? (int)calculatedIGN_CA : 0,       // calculatedIGN_CA
@@ -529,7 +531,7 @@ void statusTask(void *pvParameters) {
         (unsigned)distance,           // distance
         gas10 / 10, gas10 % 10,       // gasml
         dis10 / 10, dis10 % 10,       // dispergas
-        (unsigned)worktime);          // worktime
+        wt10 / 10, wt10 % 10);        // worktime（秒）
       // 行末に "*XX\n"（XX = 先頭から'*'直前までのXOR）を付ける。ロガーはRXバッファ溢れ等で
       // 欠けた行をこれで検出して捨てる（欠けた行が有効な値として読まれるのを防ぐ）。
       if (len > 0 && len < (int)sizeof(s1buf) - 5) {
@@ -590,10 +592,8 @@ void statusTask(void *pvParameters) {
 
       if (Launch) {
         fastestdigitalWrite(DISRESET_OUT, LOW);
-        worktime = (millis() - starttime) / 1000;
       } else {
         fastestdigitalWrite(DISRESET_OUT, HIGH);
-        worktime = 0;
         starttime = 0;
         distancemm = 0;
         distance = 0;
@@ -644,7 +644,7 @@ void statusTask(void *pvParameters) {
           Serial.print("\t");
           Serial.print(dispergas, 1);
           Serial.print("\t");
-          Serial.print(worktime);
+          Serial.print(worktime / 10.0f, 1);
           Serial.print("\t");
           Serial.print(Ne_deg);
           Serial.println();

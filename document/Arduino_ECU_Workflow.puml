@@ -126,14 +126,14 @@ partition "Routine(24µs)" <<Routine>> {
 partition "statusTask(500ms)" <<RTOS>> {
   start
   if (Launch) then (yes)
-    :DISRESET LOW;\nworktime更新;
+    :DISRESET LOW;
   else (no)
     :DISRESET HIGH;\n統計(距離/燃料)リセット;
   endif
   :INJ_timems, dispergas計算;
   :停止減衰(速度):\n最後WHからの経過(age)で速度再計算・低下;\n約8s(>8,000,000µs)で強制0;
   :無信号でRPMゼロ化(>1.2s = 1,200,000µs);
-  :シリアル出力フィールド:\nRPM\tINJ(ms)\tIGN_CA\tspeed(km/h,0.1)\tdistance(km)\tfuel(ml)\tkm/L\tworktime(s)\tNe_deg;\nSerial1はCSV同順;
+  :シリアル出力フィールド:\nRPM\tINJ(ms)\tIGN_CA\tspeed(km/h,0.1)\tdistance(km)\tfuel(ml)\tkm/L\tworktime(s,0.1s分解能)\tNe_deg;\nSerial1はCSV同順;
   stop
 }
 

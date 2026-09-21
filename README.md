@@ -527,7 +527,7 @@ AGTimer: [`AGTimer.init(period_us, callback)`](lib/AGTimer_R4_Library/src/AGTime
 
 | ポート | 形式 | 周期 | フィールド | 出力先 |
 | --- | --- | --- | --- | --- |
-| `Serial1` (HW UART) | CSV + XORチェックサム | **10Hz (100ms)** | RPM, INJ(ms), IGN_CA, INJ_END(CA), speed, distance, fuel(ml), km/L, worktime | ロガー (ESP32) <BR>https://github.com/todateman/Chibi-T_Furoshiki_Logger |
+| `Serial1` (HW UART) | CSV + XORチェックサム | **10Hz (100ms)** | RPM, INJ(ms), IGN_CA, INJ_END(CA), speed, distance, fuel(ml), km/L, worktime(s, 0.1s分解能) | ロガー (ESP32) <BR>https://github.com/todateman/Chibi-T_Furoshiki_Logger |
 | `Serial` (USB CDC) | タブ区切り | 2Hz (500ms) | 上記 + Ne_deg | PC (USB) |
 
 `Serial1` の行末は `*XX`（XX = 先頭から `*` 直前までの全バイトのXOR、16進2桁）。  

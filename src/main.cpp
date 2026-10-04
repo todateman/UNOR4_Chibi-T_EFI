@@ -527,6 +527,19 @@ void statusTask(void *pvParameters) {
 
   for (;;) {
     // ── 高速パス（10Hz）──────────────────────────────────────────────────
+    // 回転数のタイムアウトゼロ化。Serial1(10Hz)に停止後の古い回転数が残らないよう、
+    // 送信の前に毎周期判定する。
+    if (micros() - tachoBefore >= TACHO_TIMEOUT_US) {
+      tachoRpm = 0;
+      tachoCycleRpm = 0;
+      usecperdig = 1.0;
+      calculatedINJ_time = 0;
+      calculatedIGN_CA = 0;
+      // 噴射・点火を止めた以上、MAPは参照されていない。
+      // ここで255にしないと、GUIが最後に採用した行をハイライトし続ける。
+      activeMapRow = 255;
+    }
+
     INJ_timems = calculatedINJ_time * 0.1f;
     worktime = Launch ? (millis() - starttime) / 100 : 0;
 
@@ -631,16 +644,6 @@ void statusTask(void *pvParameters) {
       }
 
       // タイムアウトゼロ化
-      if (micros() - tachoBefore >= TACHO_TIMEOUT_US) {
-        tachoRpm = 0;
-        tachoCycleRpm = 0;
-        usecperdig = 1.0;
-        calculatedINJ_time = 0;
-        calculatedIGN_CA = 0;
-        // 噴射・点火を止めた以上、MAPは参照されていない。
-        // ここで255にしないと、GUIが最後に採用した行をハイライトし続ける。
-        activeMapRow = 255;
-      }
       if (micros() - speedBefore > 8000000UL) {
         speed = 0;
       }

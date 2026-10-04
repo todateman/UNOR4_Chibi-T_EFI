@@ -31,6 +31,7 @@ void IRAM_ATTR G_PULSE_ISR();
 #define PERIMETER_MM         1548UL   // [mm]
 #define TACHO_RPM_MAX        6000     // レブリミット（RPM）※これを超えると燃料噴射・点火停止
 #define Dwell_Time_US        5000     // ドゥエル時間（IGコイルへの充電時間）[us]
+#define TACHO_TIMEOUT_US     1200000UL // Zパルスがこの時間途絶えたら回転数を0とみなす [us]
 
 const uint8_t NE_A_IN      = 2;   // クランク角エンコーダAパルス(360°で360パルス)
 const uint8_t NE_B_IN      = 8;   // クランク角エンコーダBパルス(360°で360パルス)
@@ -61,7 +62,10 @@ SPISettings ma735Settings(12000000, MSBFIRST, SPI_MODE0);
 volatile unsigned long tachoBefore  = 0;  // NE_Z_INの立ち上がりで更新
 volatile unsigned long tachoAfter   = 0;  // NE_Z_INの立ち下がりで更新
 volatile unsigned long tachoWidth   = 0;  // NE_Z_INのパルス幅（us）
-volatile uint16_t      tachoRpm     = 0;  // NE_Z_INの回転数（RPM）
+volatile uint16_t      tachoRpm     = 0;  // NE_Z_INの回転数（RPM）※直近1回転
+// 直近2回転(720CA)の平均回転数（RPM）。単気筒4ストは行程によって1回転ごとの速度が
+// 交互に変わるため、MAP参照・始動判定・外部出力にはこちらを使う。
+volatile uint16_t      tachoCycleRpm = 0;
 volatile int16_t       Ne_deg       = 0;  // クランク角度（CA）
 volatile int16_t       Ne_rev       = 0;  // クランク回転数（回転数）
 
@@ -190,12 +194,18 @@ void IRAM_ATTR ReadNe_ISR() {
 
   if (fastestdigitalRead(NE_Z_IN)) {
     unsigned long now = micros();
+    unsigned long prevWidth = tachoWidth;
     tachoWidth = now - tachoBefore;
     tachoBefore = now;
     // 整数演算で RPM 計算（浮動小数点除算を避け ISR 実行時間を短縮 信号出力時の処理遅れ～1°）
     uint16_t _tachoRpm = (tachoWidth > 0) ? (uint16_t)(60000000UL / tachoWidth) : 0;
     if (_tachoRpm < 10000) {  // 10000 RPMを超える異常値は無視
       tachoRpm = _tachoRpm;
+      // 720CA平均。停止明けの1回転目は前回幅が停止時間を含むため、直近1回転の値を使う。
+      if (prevWidth > 0 && prevWidth < TACHO_TIMEOUT_US)
+        tachoCycleRpm = (uint16_t)(120000000UL / (tachoWidth + prevWidth));
+      else
+        tachoCycleRpm = _tachoRpm;
       // ドゥエル時間を回転数に応じたクランク角度に変換
       Dwell_Time_CA = (int16_t)(Dwell_Time_US * 360.0 / tachoWidth);
     }
@@ -232,8 +242,10 @@ int16_t readMA735SPI() {
   if (diff < -32767) {
     unsigned long now = micros();
     Ne_rev++;
-    if (diff < 262)
+    if (diff < 262) {
       tachoRpm = (uint16_t)(60000000.0 / (now - last_rd_time));
+      tachoCycleRpm = tachoRpm;
+    }
     last_rd_time = now;
     if (G_Pulse_Flag) {
       Ne_rev = 0;
@@ -256,7 +268,7 @@ void updateEngineMap() {
   // 1バイトのストアで行われるため、参照中にテーブルが壊れることはない。
   const MapTable &map = mapGetActive();
   for (uint8_t i = 0; i < map.count; i++) {
-    if (tachoRpm < map.e[i].rpm) {
+    if (tachoCycleRpm < map.e[i].rpm) {
       calculatedINJ_time = map.e[i].inj_time;
       calculatedIGN_CA   = map.e[i].ign_ca;
       calculatedINJ_END_CA = map.e[i].inj_end_ca;
@@ -445,7 +457,7 @@ void Routine() {
         unsigned long nowMs = millis();                 // 現在時刻(ms)
 
         // 始動成功判定 0.1秒維持チェック（タイムアウトより優先）
-        if (tachoRpm >= start_RPM) {
+        if (tachoCycleRpm >= start_RPM) {
           if (!starterActive) {                           // 始動成功判定開始
             starterActive  = true;                          // 始動成功判定中フラグON
             starterFirstMs = nowMs;                         // 始動成功判定開始時刻(ms)を記録
@@ -468,7 +480,7 @@ void Routine() {
         if (nowMs - strCrankStartMs >= STARTER_TIMEOUT_MS) {
           fastestdigitalWrite(STR_OUT, HIGH);             // スタータOFF
           STR_IN_state = false;                           // スタータ入力状態OFF
-          if (tachoRpm >= firing_RPM) {
+          if (tachoCycleRpm >= firing_RPM) {
             starterState = STR_STARTED;                     // 始動成功状態へ（ENG_ONは維持）
           } else {
             starterState = STR_FAILED;                      // 始動失敗状態へ
@@ -530,7 +542,7 @@ void statusTask(void *pvParameters) {
       unsigned wt10  = (unsigned)worktime;
       int len = snprintf(s1buf, sizeof(s1buf),
         "%u,%u.%u,%d,%d,%lu.%lu,%u,%u.%u,%u.%u,%u.%u",
-        (unsigned)tachoRpm,           // RPM
+        (unsigned)tachoCycleRpm,      // RPM（720CA平均）
         inj10 / 10, inj10 % 10,       // INJ_timems
         engRun ? (int)calculatedIGN_CA : 0,       // calculatedIGN_CA
         engRun ? (int)calculatedINJ_END_CA : 0,   // 噴射終了角 [CA]（MAP外では前回値が残る）
@@ -571,7 +583,7 @@ void statusTask(void *pvParameters) {
             "T\t%u\t%lu\t%u\t%u\t%d\t%d\t%lu\t%d\t%u\t%u\n",
             (unsigned)(++telSeq),          // 連番（取りこぼし検出）
             (unsigned long)millis(),       // 時刻 [ms]
-            (unsigned)tachoRpm,            // 回転数 [rpm]
+            (unsigned)tachoCycleRpm,       // 回転数 [rpm]（720CA平均）
             (unsigned)calculatedINJ_time,  // 噴射時間 [x0.1ms]
             (int)calculatedIGN_CA,         // 点火進角 [CA]
             (int)calculatedINJ_END_CA,     // 噴射終了角 [CA]（MAP外では前回値が残る）
@@ -619,8 +631,9 @@ void statusTask(void *pvParameters) {
       }
 
       // タイムアウトゼロ化
-      if (micros() - tachoBefore >= 1200000UL) {
+      if (micros() - tachoBefore >= TACHO_TIMEOUT_US) {
         tachoRpm = 0;
+        tachoCycleRpm = 0;
         usecperdig = 1.0;
         calculatedINJ_time = 0;
         calculatedIGN_CA = 0;
@@ -637,7 +650,7 @@ void statusTask(void *pvParameters) {
       // TELEM ON のときは上の機械可読行に一本化し、2つの書式が混ざらないようにする。
       if (SerialUSBEnabled && !mapConsoleTelemetryMuted() && !mapConsoleTelemetryStream()) {
         if (mapConsoleUsbLock(pdMS_TO_TICKS(50))) {
-          Serial.print(tachoRpm);
+          Serial.print(tachoCycleRpm);
           Serial.print("\t");
           Serial.print(INJ_timems, 1);
           Serial.print("\t");

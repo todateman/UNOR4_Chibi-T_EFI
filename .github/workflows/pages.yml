@@ -42,6 +42,8 @@ jobs:
           python-version: '3.11'
       # pyserialは不要（テストはFakeSerialを使う）
       - run: python3 tools/test_map_protocol.py
+      # 走行シミュレータ（標準ライブラリのみ。実走ログ不要）
+      - run: python3 tools/test_strategy_sim.py
 
   deploy:
     needs: test

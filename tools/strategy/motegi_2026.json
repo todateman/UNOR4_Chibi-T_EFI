@@ -1,0 +1,33 @@
+{
+  "_comment": "2026 全国大会（もてぎオーバル）用。練習走行後に fit-coast / fit-burn の出力で vehicle と burn を書き換える",
+  "course": {
+    "waypoints": "motegi_waypoint.csv",
+    "laps": 7,
+    "total_m": 16389.68,
+    "limit_s": 2360.11,
+    "no_burn_zones_m": [[1500, 2150], [1350, 2150]],
+    "guard_kmh": 16.0,
+    "finish_min_kmh": 12.0
+  },
+  "target_s": 2310.0,
+  "vehicle": {
+    "_source": "fit-coast: 2024 本番 LOG0369 + 2025 本番 LOG0503 の惰行",
+    "crr": 0.00164,
+    "k_aero": 0.000391,
+    "mass_kg": 105.0
+  },
+  "burn": {
+    "_source": "fit-burn: 2026/09/26 ドラム LOG0645（慣性 105 kg 相当、MAP は microSD/RPM.CSV 系）",
+    "inertia_kg": 105.0,
+    "speed_kmh": [10, 14, 18, 22, 26, 30, 34, 38, 42],
+    "accel_drum": [1.194, 1.139, 1.056, 0.972, 0.667, 0.514, 0.278, 0.167, 0.083],
+    "fuel_ml_s": [0.0568, 0.0573, 0.0586, 0.0624, 0.0683, 0.0731, 0.0772, 0.0796, 0.08],
+    "drum_decel": 0.5,
+    "drum_loss_fraction": 0.5
+  },
+  "restart": {
+    "fuel_ml": 0.03,
+    "delay_s": 0.5,
+    "fail_dead_s": 3.0
+  }
+}

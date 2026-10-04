@@ -22,6 +22,8 @@ Arduino UNO R4（RA4M1）/ 互換環境上で動作するエコラン車両用EC
 - [src/map_console.cpp](src/map_console.cpp) : USB シリアル経由の MAP 書き換えコンソール
 - [src/fastestdigitalRW.hpp](src/fastestdigitalRW.hpp) : ボード別最速 GPIO
 - [tools/send_map.py](tools/send_map.py) : PC 側の MAP 転送スクリプト
+- [tools/strategy_sim.py](tools/strategy_sim.py) : 加速・惰行パターンの走行シミュレータ（パラメータは `tools/strategy/`）
+- [document/motegi_strategy_2026.md](document/motegi_strategy_2026.md) : 2026 全国大会（もてぎ）の走行戦略
 - [lib/AGTimer_R4_Library](lib/AGTimer_R4_Library) : 周期タイマ
 - [platformio.ini](platformio.ini) : ビルド環境定義
 - microSD/ : MAP 用 CSV（`tools/send_map.py` でそのまま転送できる）
@@ -486,7 +488,7 @@ Ardu-Stim で回転信号を与えつつ、STR_IN/ENGOFF_IN 相当を操作す�
       `start_RPM` 到達から約100ms 後に STR_OUT が HIGH に戻る（`STR_STARTED`）
 - [x] rpm を `start_RPM` 未満に維持したまま STR_IN を ON → STR_OUT が LOW になってから
       2000ms 後に STR_OUT が HIGH に戻る（`STR_FAILED`）
-- [ ] `STR_FAILED` 状態で STR_IN を離さず維持 → 再クランキングしない（エッジ検出のみで再始動する設計の確認）  
+- [x] `STR_FAILED` 状態で STR_IN を離さず維持 → 再クランキングしない（エッジ検出のみで再始動する設計の確認）  
       ※Ardu-Stimベンチ環境では検証不可: STR_IN が実車配線の `74HC14` シュミットトリガを経由せず
       MCUへ直結されるため、ボタン押下中に生ピンが数千回/秒オーダーでチャタリングし、
       OFF→ONエッジが繰り返し検出されて `STR_FAILED` から `STR_CRANKING` へ誤って再突入し続ける
@@ -563,7 +565,7 @@ java -jar "$env:USERPROFILE\.vscode\extensions\jebbs.plantuml-2.18.1\plantuml.ja
   (現状では処理遅れに起因すると思われる過大な進角角度を設定している)
 - [x] ビルド不要の MAP 書き換え (USB シリアル CSV 転送 + EEPROM 永続化)
 - [x] スタータ制御の自動化（Issue #11）  
-  (`start_RPM`×0.1秒維持で自動停止、2秒タイムアウトで失敗検出・再試行可。始動専用MAPフラグは廃止しMAP方式に一本化)
+  (`start_RPM`×0.1秒維持で自動停止、1秒タイムアウトで失敗検出・再試行可。始動専用MAPフラグは廃止しMAP方式に一本化)
 - [ ] SD から MAP 読込実装 (`parseCSV`) ※ SD が使えるようになったら `mapParseCsvLine()` を再利用
 - [ ] AFR センサ補正ロジック (`updateAFR`)
 - [ ] クランク角推定のドリフト補正（非エンコーダ時）
@@ -595,6 +597,18 @@ java -jar "$env:USERPROFILE\.vscode\extensions\jebbs.plantuml-2.18.1\plantuml.ja
 評価結果:
 
 - [document/10HzLogging_debug_report_20260912.md](document/10HzLogging_debug_report_20260912.md)
+
+## 走行戦略（もてぎ全国大会）
+
+- [document/motegi_strategy_2026.md](document/motegi_strategy_2026.md) : 2026 全国大会の走行戦略。  
+  加速開始位置の地図、周回ごとの目標タイム、トラブル時の対応、練習走行で測るものをまとめてある
+- [tools/strategy_sim.py](tools/strategy_sim.py) : 戦略書の数値を出した走行シミュレータ。  
+  パラメータは [tools/strategy/motegi_2026.json](tools/strategy/motegi_2026.json) にあり、練習走行後に書き換えて再計算する
+
+```sh
+python3 tools/strategy_sim.py optimize        # 加速位置・停止速度・感度を出す
+python3 tools/test_strategy_sim.py            # テスト（走行ログ不要）
+```
 
 ## ライセンス
 

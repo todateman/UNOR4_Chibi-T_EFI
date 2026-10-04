@@ -116,6 +116,7 @@ enum StarterState : uint8_t {
 };
 StarterState  starterState    = STR_IDLE; // 現在のスタータ状態（IDLE:待機, CRANKING:クランキング中, STARTED:始動成功, FAILED:始動失敗）
 uint16_t      start_RPM       = 1500;     // 始動成功判定の回転数（RPM）
+uint16_t      firing_RPM      = 1000;     // 初爆判定の回転数（RPM）※クランキングのみでは届かない回転数
 unsigned long strCrankStartMs = 0;        // クランキング開始時刻（ms）
 unsigned long starterFirstMs  = 0;        // start_RPM到達判定の開始時刻（ms）
 bool          starterActive   = false;    // start_RPM維持判定中フラグ
@@ -461,12 +462,18 @@ void Routine() {
           starterFirstMs = 0;                             // 始動成功判定開始時刻リセット
         }
 
-        // スタータタイムアウト時間を経過した場合は、始動失敗とみなす
+        // スタータタイムアウト時間を経過した場合は、スタータを止める。
+        // 初爆して回転が上がり始めている(firing_RPM以上)なら噴射・点火は続け、
+        // 掛かりかけたエンジンを止めない。届いていなければ始動失敗とみなす。
         if (nowMs - strCrankStartMs >= STARTER_TIMEOUT_MS) {
-          starterState = STR_FAILED;                      // 始動失敗状態へ
           fastestdigitalWrite(STR_OUT, HIGH);             // スタータOFF
           STR_IN_state = false;                           // スタータ入力状態OFF
-          ENG_ON       = false;                           // エンジンONフラグOFF
+          if (tachoRpm >= firing_RPM) {
+            starterState = STR_STARTED;                     // 始動成功状態へ（ENG_ONは維持）
+          } else {
+            starterState = STR_FAILED;                      // 始動失敗状態へ
+            ENG_ON       = false;                           // エンジンONフラグOFF
+          }
         }
         break;
       }

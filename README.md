@@ -605,9 +605,12 @@ java -jar "$env:USERPROFILE\.vscode\extensions\jebbs.plantuml-2.18.1\plantuml.ja
   加速開始位置の地図、周回ごとの目標タイム、トラブル時の対応、練習走行で測るものをまとめてある
 - [tools/strategy_sim.py](tools/strategy_sim.py) : 戦略書の数値を出した走行シミュレータ。  
   パラメータは [tools/strategy/motegi_2026.json](tools/strategy/motegi_2026.json) にあり、練習走行後に書き換えて再計算する
+- [tools/strategy/practice_motegi_2026.json](tools/strategy/practice_motegi_2026.json) : 練習走行（10/24）のプラン。  
+  1〜3 周目は測定用のパターン、4 周目から推奨パターンで走る（`phases` に周ごとのパターンを書いてある）
 
 ```sh
 python3 tools/strategy_sim.py optimize        # 加速位置・停止速度・感度を出す
+python3 tools/strategy_sim.py --params tools/strategy/practice_motegi_2026.json plan   # 練習走行のプランを確かめる
 python3 tools/test_strategy_sim.py            # テスト（走行ログ不要）
 ```
 

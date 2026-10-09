@@ -4,6 +4,7 @@
     python3 tools/strategy_sim.py fit-coast LOG0369.CSV LOG0503.CSV   # 実走の惰行から走行抵抗
     python3 tools/strategy_sim.py fit-burn LOG0645.CSV                # ドラムから加速度・燃料流量
     python3 tools/strategy_sim.py optimize --target 38:30             # 加速・惰行パターンの探索
+    python3 tools/strategy_sim.py --params tools/strategy/practice_motegi_2026.json plan   # JSON に書いたプランの確認
     python3 tools/strategy_sim.py speed-rule                          # 速度だけで判断する規則（比較用）
     python3 tools/strategy_sim.py replay LOG0503.CSV                  # 惰行モデルを実走ログで検証
     python3 tools/strategy_sim.py map --marks 400 800 1400 --v-off 32.5 --out map.svg   # コース図
@@ -20,10 +21,17 @@ beta（ドラムの惰行損失をどこまで駆動力に上乗せするか）�
 optimize は 0 / 0.5 / 1 の感度を必ず併記する。燃料は ECU 積算値と同じ式なので、
 絶対燃費ではなくパターン同士の比較に使うこと。
 
+パラメータ JSON に "phases" を書くと、周ごとにパターンを替えるプランになる（練習走行用）:
+
+    "phases": [{"from_lap": 1, "v_off": 35.0, "marks_m": [350, 600, 1100]},
+               {"from_lap": 4, "v_off": 32.5, "marks_m": [400, 800, 1400]}]
+
+from_lap 周目からその停止速度・加速開始位置で走る。plan サブコマンドは探索をせず、このプランを評価する。
+
 ロガー（Chibi-T_Furoshiki_Logger）の tools/make_strategy_json.py が、このファイルとパラメータ JSON を
 読み込んで走行支援の設定ファイルを作る。形式が変わったことを向こうで検知できるよう、版数を 2 つ持つ:
 
-    パラメータ JSON の "format_version"   項目の名前・単位・意味を変えたら上げる
+    パラメータ JSON の "format_version"   項目を足したり、名前・単位・意味を変えたりしたら上げる
     下の INTERFACE_VERSION                上げる条件は定数のコメントを参照
 
 どちらもロガー側のスクリプトが対応版数と照合し、違えば設定ファイルを作らずに止まる。
@@ -47,9 +55,10 @@ G = 9.80665
 
 # ロガー側の tools/make_strategy_json.py が照合する版数。次のどれかを変えたら上げる:
 #   - 推奨パターンの選び方（cmd_optimize。ロガー側は同じ手順を写して持っている）
-#   - load_params / course_from_params / simulate / evaluate / pick / place_marks の引数・戻り値
+#   - load_params / course_from_params / plan_from_params / simulate / evaluate / pick / place_marks
+#     の引数・戻り値
 #   - JITTER / HOME_MARGIN_S の意味
-INTERFACE_VERSION = 1
+INTERFACE_VERSION = 2
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +401,7 @@ def pace_bump(delay_s: float) -> float:
 def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | None = None,
              zone=None, laps: int | None = None, beta: float | None = None,
              crr_scale: float = 1.0, k_scale: float = 1.0, fail_restarts: int = 0,
-             pace: list | None = None, dt_s: float = 0.1, trace: list | None = None,
+             pace: list | None = None, switches=(), dt_s: float = 0.1, trace: list | None = None,
              trace_every: int = 10) -> dict:
     """規定周回を走る。加速は次のどちらかで始め、v_off km/h に達したら止める。
 
@@ -402,6 +411,8 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
     最終盤は、惰行だけでゴールに届き、かつ規定時間まで HOME_MARGIN_S 以上残ると分かった
     時点で以降加速しない。
     pace に各周通過の目標累積時間を渡すと、通過のたびに pace_bump() で停止速度を補正する。
+    switches に [(周, 停止速度 km/h, marks), ...] を渡すと、その周に入るときに停止速度と
+    加速開始位置を替える（周は 1 始まり）。
     """
     veh, burn, rst, c = p["vehicle"], p["burn"], p["restart"], p["course"]
     crr = veh["crr"] * crr_scale
@@ -419,6 +430,7 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
     fail_at = {2 + 7 * i for i in range(fail_restarts)}
     marks = sorted(m % lap for m in marks)
     mi, mlap = 0, 0
+    switches = sorted(switches, key=lambda sw: sw[0])
 
     t = s = v = 0.0
     fuel = rst["fuel_ml"]
@@ -426,11 +438,12 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
     home = launched = False
     crossings, starts = [], [(1, 0.0, 0.0)]
     vmin = float("inf")
-    v_cut = v_off
+    bump = 0.0
     step = 0
     while s < total:
         res = G * (crr + course.slope(s)) + k * v * v
         kmh = v * 3.6
+        v_cut = v_off + bump
         hit = False
         while marks and s >= mlap * lap + marks[mi]:
             hit = True
@@ -472,7 +485,10 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
         if int(s2 // lap) > int(s // lap):
             crossings.append((t + dt_s, fuel, burns))
             if pace is not None and len(crossings) <= len(pace):
-                v_cut = v_off + pace_bump(t + dt_s - pace[len(crossings) - 1])
+                bump = pace_bump(t + dt_s - pace[len(crossings) - 1])
+            while switches and switches[0][0] <= len(crossings) + 1:
+                _, v_off, new_marks = switches.pop(0)
+                marks, mi, mlap = sorted(m % lap for m in new_marks), 0, len(crossings)
         s = s2
         t += dt_s
         step += 1
@@ -501,13 +517,42 @@ def _coast_home_s(course, s, v, crr, k, total, vfin):
 JITTER = ((0.0, 0.0), (-30.0, -0.5), (30.0, 0.5))
 
 
-def evaluate(p: dict, course: Course, pol: dict, **kw) -> dict:
-    """pol = {"v_off":, "marks":, "v_on":, "zone":} を JITTER の 3 通りで走らせてまとめる。"""
-    runs = []
+def jittered(pol: dict):
+    """pol を JITTER の 3 通りにずらし、simulate() へ渡す (v_off, キーワード引数) を順に返す。"""
+    v_on = pol.get("v_on")
     for dm, dv in JITTER:
-        v_on = pol.get("v_on")
-        runs.append(simulate(p, course, pol["v_off"], marks=[m + dm for m in pol.get("marks", ())],
-                             v_on=None if v_on is None else v_on + dv, zone=pol.get("zone"), **kw))
+        yield pol["v_off"], {
+            "marks": [m + dm for m in pol.get("marks", ())],
+            "v_on": None if v_on is None else v_on + dv,
+            "zone": pol.get("zone"),
+            "switches": [(lap, v, [m + dm for m in ms]) for lap, v, ms in pol.get("switches", ())],
+        }
+
+
+def plan_from_params(p: dict) -> dict | None:
+    """パラメータの "phases"（周ごとのパターン）を pol にして返す。phases が無ければ None。
+
+    先頭の段階が 1 周目から走るパターンで、2 つ目以降は pol["switches"] に入る。
+    """
+    phases = p.get("phases")
+    if not phases:
+        return None
+    laps = p["course"]["laps"]
+    firsts = [ph["from_lap"] for ph in phases]
+    if firsts[0] != 1:
+        raise ValueError("phases の先頭は from_lap 1 にしてください（%s）" % firsts[0])
+    if any(b <= a for a, b in zip(firsts, firsts[1:])) or firsts[-1] > laps:
+        raise ValueError("phases の from_lap は昇順で %d 周以内にしてください（%s）" % (laps, firsts))
+    if any(not ph["marks_m"] for ph in phases):
+        raise ValueError("phases の marks_m が空です")
+    pats = [(ph["from_lap"], float(ph["v_off"]), sorted(float(m) for m in ph["marks_m"])) for ph in phases]
+    return {"v_off": pats[0][1], "marks": pats[0][2], "v_on": p["course"].get("guard_kmh", 16.0),
+            "switches": pats[1:]}
+
+
+def evaluate(p: dict, course: Course, pol: dict, **kw) -> dict:
+    """pol = {"v_off":, "marks":, "v_on":, "zone":, "switches":} を JITTER の 3 通りで走らせてまとめる。"""
+    runs = [simulate(p, course, v_off, **jit, **kw) for v_off, jit in jittered(pol)]
     r = dict(runs[0])
     r.update(pol=pol,
              time_s=max(q["time_s"] for q in runs),
@@ -592,10 +637,15 @@ def place_marks(p, course, n, lap_target_s, floor_kmh, grid=100, min_gap=200, sw
     return (marks, best[0]) if best is not None else None
 
 
+def _marks_text(marks, v_off: float) -> str:
+    return "位置 [%s] m で開始 → %.1f km/h で停止" % (", ".join("%.0f" % m for m in marks), v_off)
+
+
 def _pol_text(pol: dict) -> str:
     if pol.get("marks"):
-        return "位置 [%s] m で開始 → %.1f km/h で停止" % (
-            ", ".join("%.0f" % m for m in pol["marks"]), pol["v_off"])
+        return " ／ ".join([_marks_text(pol["marks"], pol["v_off"])]
+                          + ["%d 周目から %s" % (lap, _marks_text(ms, v))
+                             for lap, v, ms in pol.get("switches", ())])
     return "ON %.0f / OFF %.0f km/h  禁止 %d-%d m" % (
         pol["v_on"], pol["v_off"], pol["zone"][0], pol["zone"][1])
 
@@ -606,13 +656,19 @@ def _line(r: dict, total_m: float) -> str:
                total_m / r["time_s"] * 3.6, r["fuel_ml"], r["burns"]))
 
 
-def _report(p, course, rec, args, limit) -> float:
+def _shift_v_off(pol: dict, dv: float) -> dict:
+    """停止速度を全周で dv km/h ずらした pol。"""
+    return dict(pol, v_off=pol["v_off"] + dv,
+                switches=[(lap, v + dv, ms) for lap, v, ms in pol.get("switches", ())])
+
+
+def _report(p, course, rec, args, limit, what: str = "推奨パターン") -> float:
     pol = rec["pol"]
     trace = [] if args.trace else None
     r = simulate(p, course, pol["v_off"], marks=pol.get("marks", ()), v_on=pol.get("v_on"),
-                 zone=pol.get("zone"), trace=trace)
+                 zone=pol.get("zone"), switches=pol.get("switches", ()), trace=trace)
     cum = [tl for tl, _, _ in r["crossings"]]
-    print("\n推奨パターンをずらさずに走った場合（スタートラインからの距離 m @ 加速開始時の速度 km/h）:")
+    print("\n%sをずらさずに走った場合（スタートラインからの距離 m @ 加速開始時の速度 km/h）:" % what)
     prev = 0.0
     for n, tl in enumerate(cum, 1):
         st = ["%4.0f@%2.0f" % (pos, kmh) for lp, pos, kmh in r["starts"] if lp == n]
@@ -623,7 +679,7 @@ def _report(p, course, rec, args, limit) -> float:
 
     print("\n停止速度が系統的にずれたときの合計時間（補正なし）:")
     for dv in (-1.0, -0.5, 0.5, 1.0):
-        q = evaluate(p, course, dict(pol, v_off=pol["v_off"] + dv))
+        q = evaluate(p, course, _shift_v_off(pol, dv))
         print("  %+.1f km/h → %s (%+.0f s)  燃料 %.2f ml"
               % (dv, mmss(q["time_s"]), q["time_s"] - rec["time_s"], q["fuel_ml"]))
 
@@ -642,7 +698,7 @@ def _report(p, course, rec, args, limit) -> float:
     worst = 0.0
     for name, kw in cases:
         kw = dict(kw)
-        q_pol = dict(pol, v_off=pol["v_off"] + kw.pop("_dv", 0.0))
+        q_pol = _shift_v_off(pol, kw.pop("_dv", 0.0))
         o = evaluate(p, course, q_pol, **kw)
         q = evaluate(p, course, q_pol, pace=cum, **kw)
         worst = max(worst, q["time_s"])
@@ -656,6 +712,29 @@ def _report(p, course, rec, args, limit) -> float:
             w.writerows(trace)
         print("\n速度トレース: %s" % args.trace)
     return worst
+
+
+def cmd_plan(args) -> int:
+    """パラメータの phases に書いたプラン（周ごとのパターン）を評価する。探索はしない。"""
+    p = load_params(args.params)
+    course = course_from_params(p, args.waypoints)
+    c = p["course"]
+    try:
+        pol = plan_from_params(p)
+    except ValueError as e:
+        print(e)
+        return 1
+    if pol is None:
+        print("パラメータに phases がありません: %s" % args.params)
+        return 1
+    limit = c["limit_s"]
+    rec = evaluate(p, course, pol)
+    print("規定 %s / %d 周 %.2f m / 保険の加速開始 %.0f km/h"
+          % (mmss(limit), c["laps"], c["total_m"], pol["v_on"]))
+    print("（時間は開始位置を ±30 m ずらした 3 通りの最短〜最長、燃料は平均、加速回数は最大）")
+    print("  %s  最低 %.1f km/h" % (_line(rec, c["total_m"]), rec["min_kmh"]))
+    worst = _report(p, course, rec, args, limit, "プラン")
+    return 0 if worst <= limit else 2
 
 
 def cmd_optimize(args) -> int:
@@ -954,6 +1033,11 @@ def main(argv=None) -> int:
     s.add_argument("--fails", type=int, default=3, help="感度に入れる再始動失敗の回数")
     s.add_argument("--trace", help="推奨パターンの速度トレース CSV の出力先")
     s.set_defaults(func=cmd_optimize)
+
+    s = sub.add_parser("plan", help="JSON の phases に書いたプラン（周ごとのパターン）を評価")
+    s.add_argument("--fails", type=int, default=3, help="感度に入れる再始動失敗の回数")
+    s.add_argument("--trace", help="プランの速度トレース CSV の出力先")
+    s.set_defaults(func=cmd_plan)
 
     s = sub.add_parser("speed-rule", help="速度だけで判断する規則の格子探索（比較用）")
     s.add_argument("--target", help="目標時間 MM:SS（既定は JSON の target_s）")

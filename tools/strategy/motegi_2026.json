@@ -1,6 +1,6 @@
 {
   "_comment": "2026 全国大会（もてぎオーバル）用。練習走行後に fit-coast / fit-burn の出力で vehicle と burn を書き換える",
-  "format_version": 1,
+  "format_version": 2,
   "course": {
     "waypoints": "motegi_waypoint.csv",
     "laps": 7,

@@ -295,6 +295,65 @@ class TestSimulate(unittest.TestCase):
         self.assertAlmostEqual(n, 3.0)
         self.assertGreaterEqual(vmin, 17.0)
 
+    def test_switch_to_same_pattern_changes_nothing(self):
+        r = ss.simulate(self.p, self.course, 32.5, marks=self.marks, v_on=16.0,
+                        switches=[(4, 32.5, self.marks)])
+        self.assertEqual(r["time_s"], self.base["time_s"])
+        self.assertEqual(r["starts"], self.base["starts"])
+
+    def test_switch_changes_marks_and_cut_speed_from_that_lap(self):
+        first = [350.0, 600.0, 1100.0]
+        trace = []
+        r = ss.simulate(self.p, self.course, 35.0, marks=first, v_on=16.0,
+                        switches=[(4, 32.5, self.marks)], trace=trace, trace_every=1)
+        for lap, pos, _ in r["starts"][1:]:
+            marks = first if lap < 4 else self.marks
+            self.assertLess(min(abs(pos - m) for m in marks), 5.0, (lap, pos))
+        top = {n: max(kmh for _, _, lap, _, kmh, _, _ in trace if lap == n) for n in (3, 4)}
+        # 停止速度を 1 ステップ（0.1 s）ぶん行き過ぎる
+        self.assertAlmostEqual(top[3], 35.0, delta=0.5)
+        self.assertAlmostEqual(top[4], 32.5, delta=0.5)
+
+    def test_pace_feedback_survives_switch(self):
+        # 切り替えたあとも、通過タイムの遅れによる停止速度の補正が効く
+        kw = dict(marks=[350.0, 600.0, 1100.0], v_on=16.0, switches=[(4, 32.5, self.marks)])
+        cum = [t for t, _, _ in ss.simulate(self.p, self.course, 35.0, **kw)["crossings"]]
+        slow = dict(kw, crr_scale=1.2, k_scale=1.2)
+        open_loop = ss.simulate(self.p, self.course, 35.0, **slow)
+        closed = ss.simulate(self.p, self.course, 35.0, pace=cum, **slow)
+        self.assertLess(closed["time_s"], open_loop["time_s"] - 15)
+
+    def test_plan_from_params(self):
+        self.assertIsNone(ss.plan_from_params(self.p))
+        phases = [{"from_lap": 1, "v_off": 35, "marks_m": [1100, 350]},
+                  {"from_lap": 4, "v_off": 32.5, "marks_m": [400, 800, 1400]}]
+        pol = ss.plan_from_params(dict(self.p, phases=phases))
+        self.assertEqual((pol["v_off"], pol["marks"], pol["v_on"]), (35.0, [350.0, 1100.0], 16.0))
+        self.assertEqual(pol["switches"], [(4, 32.5, [400.0, 800.0, 1400.0])])
+        for bad in ([dict(phases[0], from_lap=2)],                      # 1 周目から始まらない
+                    [phases[0], dict(phases[1], from_lap=1)],          # 昇順でない
+                    [phases[0], dict(phases[1], from_lap=8)],          # 規定周回を超える
+                    [dict(phases[0], marks_m=[])]):                    # 加速開始位置が無い
+            with self.assertRaises(ValueError):
+                ss.plan_from_params(dict(self.p, phases=bad))
+
+    def test_bundled_practice_plan_covers_the_measurements(self):
+        p = ss.load_params(os.path.join(os.path.dirname(ss.DEFAULT_PARAMS), "practice_motegi_2026.json"))
+        for key in ("course", "vehicle", "burn", "restart"):
+            self.assertEqual(p[key], self.p[key], key)      # 本番用と同じモデルで計算する
+        pol = ss.plan_from_params(p)
+        r = ss.evaluate(p, self.course, pol)
+        self.assertLess(r["time_s"], p["course"]["limit_s"] - 60)
+        # 1〜3 周目: バックストレート（平坦、1020〜1590 m）で 21 km/h 以下から加速を始める
+        back = [(lap, pos, kmh) for lap, pos, kmh in r["starts"] if lap <= 3 and 1020 <= pos <= 1500]
+        self.assertEqual([lap for lap, _, _ in back], [1, 2, 3])
+        self.assertTrue(all(kmh <= 21.0 for _, _, kmh in back), back)
+        # 惰行で 18.5 km/h 以下まで落ちてから加速する回が 2 本以上
+        self.assertGreaterEqual(sum(1 for _, _, kmh in r["starts"][1:] if kmh <= 18.5), 2)
+        # 4〜6 周目は推奨パターンの位置で 3 回ずつ加速する
+        for lap in (4, 5, 6):
+            self.assertEqual(sum(1 for n, _, _ in r["starts"] if n == lap), 3, lap)
+
 
 class TestMap(unittest.TestCase):
     @classmethod

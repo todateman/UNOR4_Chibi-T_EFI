@@ -19,6 +19,14 @@
 beta（ドラムの惰行損失をどこまで駆動力に上乗せするか）は実走で確かめるまで決められないので、
 optimize は 0 / 0.5 / 1 の感度を必ず併記する。燃料は ECU 積算値と同じ式なので、
 絶対燃費ではなくパターン同士の比較に使うこと。
+
+ロガー（Chibi-T_Furoshiki_Logger）の tools/make_strategy_json.py が、このファイルとパラメータ JSON を
+読み込んで走行支援の設定ファイルを作る。形式が変わったことを向こうで検知できるよう、版数を 2 つ持つ:
+
+    パラメータ JSON の "format_version"   項目の名前・単位・意味を変えたら上げる
+    下の INTERFACE_VERSION                上げる条件は定数のコメントを参照
+
+どちらもロガー側のスクリプトが対応版数と照合し、違えば設定ファイルを作らずに止まる。
 """
 
 from __future__ import annotations
@@ -36,6 +44,12 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PARAMS = os.path.join(HERE, "strategy", "motegi_2026.json")
 G = 9.80665
+
+# ロガー側の tools/make_strategy_json.py が照合する版数。次のどれかを変えたら上げる:
+#   - 推奨パターンの選び方（cmd_optimize。ロガー側は同じ手順を写して持っている）
+#   - load_params / course_from_params / simulate / evaluate / pick / place_marks の引数・戻り値
+#   - JITTER / HOME_MARGIN_S の意味
+INTERFACE_VERSION = 1
 
 
 # ---------------------------------------------------------------------------

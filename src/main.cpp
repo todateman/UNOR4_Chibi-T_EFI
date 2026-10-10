@@ -31,6 +31,10 @@ void IRAM_ATTR G_PULSE_ISR();
 #define PERIMETER_MM         1548UL   // [mm]
 #define TACHO_RPM_MAX        6000     // レブリミット（RPM）※これを超えると燃料噴射・点火停止
 #define Dwell_Time_US        5000     // ドゥエル時間（IGコイルへの充電時間）[us]
+// クランキング中（スタータON中）のドゥエル時間 [us]。スタータ負荷でコイル端子電圧が12〜13Vに
+// 下がり、5msでは内蔵イグナイタの電流制限(約7.9A)の7〜8割までしか充電できないため延ばす。
+// 必要時間の目安は 約77mVs ÷ 通電中の端子電圧（Issue #12 で実測）。
+#define Dwell_Time_CRANK_US  6500
 #define TACHO_TIMEOUT_US     1200000UL // Zパルスがこの時間途絶えたら回転数を0とみなす [us]
 // カムパルスがこの時間途絶えたら同期喪失とみなし cycleReset() を呼び直す [us]。
 // クランキング1サイクル(600rpmで200ms)より長くすること。短いと毎サイクル発動し、
@@ -95,6 +99,7 @@ volatile bool     mapOutOfRange      = false;
 // ISRから書くが、uint8_tの単一ストアはtearingしないためロック不要。
 volatile uint8_t  activeMapRow       = 255;
 volatile int16_t  Dwell_Time_CA      = 0; // ドゥエル時間（IGコイルへの充電時間）をクランク角度（CA）へ変換
+volatile uint16_t Dwell_Time_Act_US  = Dwell_Time_US; // 適用中のドゥエル時間（us）※Zパルスごとに更新
 volatile int16_t  INJ_STR_CA         = 0; // 燃料噴射開始タイミング角度（CA）※INJ_END_CAと噴射時間から逆算
 volatile uint8_t  INJ_Status         = 1; // 燃料噴射状態（0:OFF, 1:ON, 2:ON_HOLD）
 volatile uint8_t  IGN_Status         = 1; // 点火状態（0:OFF, 1:ON, 2:ON_HOLD）
@@ -212,7 +217,9 @@ void IRAM_ATTR ReadNe_ISR() {
       else
         tachoCycleRpm = _tachoRpm;
       // ドゥエル時間を回転数に応じたクランク角度に変換
-      Dwell_Time_CA = (int16_t)(Dwell_Time_US * 360.0 / tachoWidth);
+      // クランキング中だけ延長する。通電開始角と通電時間の上限が食い違わないよう、同じ値を使う。
+      Dwell_Time_Act_US = (starterState == STR_CRANKING) ? Dwell_Time_CRANK_US : Dwell_Time_US;
+      Dwell_Time_CA = (int16_t)(Dwell_Time_Act_US * 360.0 / tachoWidth);
     }
     // カムパルスはタイミングチェーンのテンションで揺れるため、360〜720CA（爆発・排気行程）に
     // 入る前提で Ne_deg > 360 の Z でだけ頭出しする。ただし電源投入・リセット直後は Ne_deg が
@@ -444,7 +451,7 @@ void Routine() {
   // 点火ON_HOLD状態の処理
   if (IGN_Status == 2) {
     // 進角角度に達したら or ドゥエル時間が経過したらOFF
-    if (Ne_deg >= 360 - calculatedIGN_CA || micros() - timeNow_IGN_ON >= Dwell_Time_US) {
+    if (Ne_deg >= 360 - calculatedIGN_CA || micros() - timeNow_IGN_ON >= Dwell_Time_Act_US) {
       timeNow_IGN_OFF = micros();
       fastestdigitalWrite(IGN_OUT, HIGH);
       IGN_Status = 1;

@@ -55,6 +55,7 @@ pio device monitor -b 115200
 | PERIMETER_MM | 1548 | タイヤ周長(mm) |
 | TACHO_RPM_MAX | 6000 | レブリミット <BR> （回転数上限保護） |
 | Dwell_Time_US | 5000 | ドゥエル時間（us） <BR> IGコイルへの充電時間 |
+| Dwell_Time_CRANK_US | 6500 | クランキング中（スタータON中）のドゥエル時間（us） <BR> スタータ負荷による電圧低下の補償 |
 | start_RPM | 1500 | スタータ自動停止の判定回転数（RPM） <BR> MAP切替用の専用定数ではない |
 
 始動時・通常時で切り替わる専用定数（`start_INJ_time` 等）は無い。  
@@ -157,10 +158,10 @@ gasml += ( (Δt * 0.0000007) + 0.0015 ) / 1.5073
 ## 点火制御
 
 - 進角: `calculatedIGN_CA`  
-- ドゥエル時間（µs）: `Dwell_Time_US`
-  - ドゥエル時間をクランク角に変換: `Dwell_Time_CA = Dwell_Time_US * 360 / tachoWidth`
+- ドゥエル時間（µs）: `Dwell_Time_US`（クランキング中は `Dwell_Time_CRANK_US`）。適用中の値は `Dwell_Time_Act_US`
+  - ドゥエル時間をクランク角に変換: `Dwell_Time_CA = Dwell_Time_Act_US * 360 / tachoWidth`
 - 条件: `Ne_deg >= (360 - calculatedIGN_CA - Dwell_Time_CA)` で点火 LOW  
-- 保持: クランク角が `360 - calculatedIGN_CA` に達する or `Dwell_Time_US` 経過で HIGH 戻し  
+- 保持: クランク角が `360 - calculatedIGN_CA` に達する or `Dwell_Time_Act_US` 経過で HIGH 戻し  
 - 点火: HIGH 戻しの瞬間にスパークプラグから放電
 
 ## MAP
@@ -557,7 +558,7 @@ java -jar "$env:USERPROFILE\.vscode\extensions\jebbs.plantuml-2.18.1\plantuml.ja
   - カム同期タイムアウト ≈ 500ms
   - RPMゼロ化 ≈ 1.2s無信号
   - 速度強制ゼロ ≈ 8s無信号
-  - 点火保持 5ms
+  - 点火保持 5ms（クランキング中 6.5ms）
 
 ## 拡張アイデア (TODO)
 

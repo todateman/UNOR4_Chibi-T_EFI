@@ -134,7 +134,7 @@ uint16_t      firing_RPM      = 1000;     // 初爆判定の回転数（RPM）�
 unsigned long strCrankStartMs = 0;        // クランキング開始時刻（ms）
 unsigned long starterFirstMs  = 0;        // start_RPM到達判定の開始時刻（ms）
 bool          starterActive   = false;    // start_RPM維持判定中フラグ
-unsigned long STARTER_TIMEOUT_MS = 1000;  // スタータタイムアウト（ms）
+unsigned long STARTER_TIMEOUT_MS = 1500;  // スタータタイムアウト（ms）
 
 volatile float gasml       = 0.0;         // 燃料消費量（ml）
 volatile float INJ_timems  = 0.0;         // 燃料噴射時間（ms）

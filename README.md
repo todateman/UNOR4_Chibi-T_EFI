@@ -103,14 +103,14 @@ LOW アクティブ出力注意 (INJ/IGN/STR/DISRESET)。
 2. 周期関数 [`Routine`](src/main.cpp):
    - スタート/キル状態評価
    - **スタータステートマシン** (`StarterState`): キルスイッチON時にスタートボタン押下（エッジ）でクランキング開始。  
-     `start_RPM` 以上を 0.1秒 維持で始動成功（スタータ自動停止）、2秒タイムアウトで始動失敗（再押しで再試行可）。  
+     `start_RPM` 以上を 0.1秒 維持で始動成功（スタータ自動停止）、1.5秒（`STARTER_TIMEOUT_MS`）タイムアウトで始動失敗（再押しで再試行可）。  
      低rpm帯のMAP行（400/800/1200rpm、`inj_end_ca`=20）が始動用パラメータとして自動的に採用される  
      （始動専用のMAP切替フラグは無い。[MAP](#map) 節参照）。
 
      ```txt
      STR_IDLE → [ボタン押下(エッジ)+キルスイッチON] → STR_CRANKING
      STR_CRANKING → [start_RPM以上を0.1秒維持] → STR_STARTED（スタータOFF）
-     STR_CRANKING → [2秒タイムアウト] → STR_FAILED（スタータOFF・ENG_ON OFF）
+     STR_CRANKING → [1.5秒タイムアウト] → STR_FAILED（スタータOFF・ENG_ON OFF）
      STR_FAILED → [ボタン再押し(エッジ)] → STR_CRANKING
      キルスイッチOFF → 常に STR_IDLE へ強制リセット（`Launch` はリセットしない）
      ```
@@ -566,7 +566,7 @@ java -jar "$env:USERPROFILE\.vscode\extensions\jebbs.plantuml-2.18.1\plantuml.ja
   (現状では処理遅れに起因すると思われる過大な進角角度を設定している)
 - [x] ビルド不要の MAP 書き換え (USB シリアル CSV 転送 + EEPROM 永続化)
 - [x] スタータ制御の自動化（Issue #11）  
-  (`start_RPM`×0.1秒維持で自動停止、1秒タイムアウトで失敗検出・再試行可。始動専用MAPフラグは廃止しMAP方式に一本化)
+  (`start_RPM`×0.1秒維持で自動停止、1.5秒タイムアウトで失敗検出・再試行可。始動専用MAPフラグは廃止しMAP方式に一本化)
 - [ ] SD から MAP 読込実装 (`parseCSV`) ※ SD が使えるようになったら `mapParseCsvLine()` を再利用
 - [ ] AFR センサ補正ロジック (`updateAFR`)
 - [ ] クランク角推定のドリフト補正（非エンコーダ時）

@@ -546,7 +546,10 @@ void statusTask(void *pvParameters) {
     // ── 高速パス（10Hz）──────────────────────────────────────────────────
     // 回転数のタイムアウトゼロ化。Serial1(10Hz)に停止後の古い回転数が残らないよう、
     // 送信の前に毎周期判定する。
-    if (micros() - tachoBefore >= TACHO_TIMEOUT_US) {
+    // tachoBefore は micros() より先に読む。逆順だと、micros() を読んだ直後に Z パルス割込みが
+    // 入ったとき tachoBefore のほうが新しくなり、符号なし減算が桁あふれして運転中に誤ってゼロ化される。
+    const unsigned long lastZUs = tachoBefore;
+    if (micros() - lastZUs >= TACHO_TIMEOUT_US) {
       tachoRpm = 0;
       tachoCycleRpm = 0;
       usecperdig = 1.0;
@@ -651,7 +654,9 @@ void statusTask(void *pvParameters) {
       dispergas = (gasml > 0.0f) ? (float)distance / gasml : 0.0f;
 
       // 停止減衰: 最後のパルスから時間が経つほど再計算速度を小さくする
-      unsigned long age = micros() - speedBefore;
+      // speedBefore も同じ理由で micros() より先に読む。
+      const unsigned long lastWheelUs = speedBefore;
+      unsigned long age = micros() - lastWheelUs;
       if (age > speedWidth && speedWidth > 0) {
         unsigned long decay = (36000UL * PERIMETER_MM) / age;
         if (decay < speed) {
@@ -661,7 +666,7 @@ void statusTask(void *pvParameters) {
       }
 
       // タイムアウトゼロ化
-      if (micros() - speedBefore > 8000000UL) {
+      if (age > 8000000UL) {
         speed = 0;
       }
 

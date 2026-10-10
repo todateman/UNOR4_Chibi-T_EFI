@@ -111,6 +111,7 @@ volatile bool inj360Reset = false;        // 360CA安全リセットフラグ
 volatile bool G_Pulse      = false;       // G_INのパルス状態（立ち上がり）
 volatile bool G_Pulse_Flag = false;       // G_INのパルスフラグ（立ち上がり）
 volatile bool CycleReset   = false;       // サイクルリセットフラグ（立ち上がり）
+volatile bool CycleSynced  = false;       // 頭出し済みフラグ（電源投入・リセット直後はNe_degが実角度と未対応）
 
 bool Launch = false;                      // スタートフラグ（エンジン始動）
 bool startState = HIGH;                   // スタートスイッチ状態（OFF=HIGH, ON=LOW）
@@ -213,10 +214,15 @@ void IRAM_ATTR ReadNe_ISR() {
       // ドゥエル時間を回転数に応じたクランク角度に変換
       Dwell_Time_CA = (int16_t)(Dwell_Time_US * 360.0 / tachoWidth);
     }
-    if (Ne_deg > 360 && G_Pulse_Flag) {
+    // カムパルスはタイミングチェーンのテンションで揺れるため、360〜720CA（爆発・排気行程）に
+    // 入る前提で Ne_deg > 360 の Z でだけ頭出しする。ただし電源投入・リセット直後は Ne_deg が
+    // 実角度と対応しておらず、停止位置によってはこの条件で 360CA ずれたまま固定されるため、
+    // 最初の1回だけはカムパルス後の最初の Z で頭出しする（Issue #12）。
+    if (G_Pulse_Flag && (Ne_deg > 360 || !CycleSynced)) {
       Ne_deg = 0;
       G_Pulse_Flag = false;
       CycleReset = true;
+      CycleSynced = true;
     }
   }
 }

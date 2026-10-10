@@ -554,7 +554,7 @@ java -jar "$env:USERPROFILE\.vscode\extensions\jebbs.plantuml-2.18.1\plantuml.ja
   - ROUTINE_CYCLE_US = 24µs
   - PERIMETER_MM = 1548mm
   - 速度上限 99.9km/h (内部999)
-  - カム同期タイムアウト ≈ 50ms
+  - カム同期タイムアウト ≈ 500ms
   - RPMゼロ化 ≈ 1.2s無信号
   - 速度強制ゼロ ≈ 8s無信号
   - 点火保持 5ms

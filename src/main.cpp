@@ -32,6 +32,10 @@ void IRAM_ATTR G_PULSE_ISR();
 #define TACHO_RPM_MAX        6000     // レブリミット（RPM）※これを超えると燃料噴射・点火停止
 #define Dwell_Time_US        5000     // ドゥエル時間（IGコイルへの充電時間）[us]
 #define TACHO_TIMEOUT_US     1200000UL // Zパルスがこの時間途絶えたら回転数を0とみなす [us]
+// カムパルスがこの時間途絶えたら同期喪失とみなし cycleReset() を呼び直す [us]。
+// クランキング1サイクル(600rpmで200ms)より長くすること。短いと毎サイクル発動し、
+// 点火済みフラグが消えて通電延長・二重点火が起きる（Issue #12 で実測）。
+#define CAM_SYNC_TIMEOUT_US  500000UL
 
 const uint8_t NE_A_IN      = 2;   // クランク角エンコーダAパルス(360°で360パルス)
 const uint8_t NE_B_IN      = 8;   // クランク角エンコーダBパルス(360°で360パルス)
@@ -353,7 +357,7 @@ void Routine() {
     lastZMicros = micros();
   }
   // カムパルスが来ずに一定時間経過したら、自動的に cycleReset() を繰り返し呼び出す
-  if (micros() - lastZMicros > 50000UL) {
+  if (micros() - lastZMicros > CAM_SYNC_TIMEOUT_US) {
     cycleReset();
     lastZMicros = micros();
   }

@@ -75,7 +75,7 @@ partition "Routine(24µs)" <<Routine>> {
     endif
   endif
   :G_IN入力に応じて\nG_Pulse/G_Flag更新;
-  :カム同期タイムアウト監視\n(>50msでcycleReset);
+  :カム同期タイムアウト監視\n(>500msでcycleReset);
   if (CycleReset) then (yes)
     :updateEngineMap();
     :inj_end_ca選択\n(始動時:start_INJ_END_CA / 通常:INJ_END_CA);
@@ -147,7 +147,7 @@ endlegend
 legend right
 数値注記:
 - ROUTINE_CYCLE_US=24µs, PERIMETER_MM=1548mm, 速度上限=99.9km/h(内部999)
-- カム同期タイムアウト≈50ms, RPMゼロ化≈1.2s, 速度強制ゼロ≈8s, 点火保持5ms
+- カム同期タイムアウト≈500ms, RPMゼロ化≈1.2s, 速度強制ゼロ≈8s, 点火保持5ms
 - 0CA跨ぎ噴射: INJ_STR_CA<0の場合+720で正規化(0〜720CA範囲)
 - 360CA安全リセット: 1サイクル1回限り、噴射継続中を強制OFF
 endlegend

@@ -1,5 +1,5 @@
-﻿﻿# UNOR4_Chibi-T_EFI
-
+# UNOR4_Chibi-T_EFI
+  
 Arduino UNO R4（RA4M1）/ 互換環境上で動作するエコラン車両用ECUプログラム
 
 ## 概要
@@ -599,13 +599,15 @@ java -jar "$env:USERPROFILE\.vscode\extensions\jebbs.plantuml-2.18.1\plantuml.ja
 
 - [document/10HzLogging_debug_report_20260912.md](document/10HzLogging_debug_report_20260912.md)
 
-## 走行戦略（もてぎ全国大会）
+## 走行戦略
+
+### 2026全国大会
 
 - [document/motegi_strategy_2026.md](document/motegi_strategy_2026.md) : 2026 全国大会の走行戦略。  
   加速開始位置の地図、周回ごとの目標タイム、トラブル時の対応、練習走行で測るものをまとめてある
 - [tools/strategy_sim.py](tools/strategy_sim.py) : 戦略書の数値を出した走行シミュレータ。  
   パラメータは [tools/strategy/motegi_2026.json](tools/strategy/motegi_2026.json) にあり、練習走行後に書き換えて再計算する
-- [tools/strategy/practice_motegi_2026.json](tools/strategy/practice_motegi_2026.json) : 練習走行（10/24）のプラン。  
+- [tools/strategy/practice_motegi_2026.json](tools/strategy/practice_motegi_2026.json) : 練習走行（2026/10/24）のプラン。  
   1〜3 周目は測定用のパターン、4 周目から推奨パターンで走る（`phases` に周ごとのパターンを書いてある）
 
 ```sh

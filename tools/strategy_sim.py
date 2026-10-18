@@ -30,7 +30,8 @@ optimize は 0 / 0.5 / 1 の感度を必ず併記する。燃料は ECU 積算�
 
 from_lap 周目からその停止速度・加速開始位置で走る。plan サブコマンドは探索をせず、このプランを評価する。
 
-コース距離は、ロガーが周回を数えるコントロールライン（ウェイポイント ID 1）を 0 とする。course に
+コース距離はウェイポイント ID 1 を 0 とし、ID 1 の通過を周回の通過とする（ロガーのコントロールラインは
+その約 7 m 手前で、通過は約 1 秒早い）。course に
 start_m（発進位置）と finish_m（ゴールラインの位置）を書くと、そこから発進し、コントロールラインを
 laps - 1 回通過したあと finish_m でゴールする（race_span）。
 
@@ -187,7 +188,8 @@ def course_from_params(p: dict, waypoints: str | None = None) -> Course:
 def race_span(c: dict, lap: float, laps: int | None = None):
     """(発進位置 m, ゴールまでの通算距離 m, ゴールがコントロールライン上か)。
 
-    コース距離はコントロールライン（ウェイポイント ID 1、ロガーが周回を数える線）を 0 とする。
+    コース距離はウェイポイント ID 1 を 0 とし、ここの通過を周回の通過とする（ロガーのコントロールラインは
+    約 7 m 手前）。
     course の start_m（発進位置）と finish_m（ゴールラインの位置）が無ければ、コントロールラインから
     発進して規定周回ちょうどでゴールする。finish_m があるときは、コントロールラインを laps - 1 回
     通過したあと finish_m でゴールする（もてぎは発進もゴールも周回路の内側の別レーン）。
@@ -899,7 +901,7 @@ def _span_text(c: dict, course: Course) -> str:
     s0, total, on_line = race_span(c, course.lap_m)
     if on_line and not s0:
         return "発進・ゴールともコントロールライン上"
-    return ("発進 %.0f m・ゴール %.0f m（コントロールラインからの距離）、走行距離 %.0f m（公式距離との差 %+.0f m）"
+    return ("発進 %.0f m・ゴール %.0f m（ID 1 からの距離）、走行距離 %.0f m（公式距離との差 %+.0f m）"
             % (s0, total % course.lap_m if not on_line else course.lap_m, total - s0, total - s0 - c["total_m"]))
 
 
@@ -1213,7 +1215,7 @@ def course_svg(course: Course, marks, spans, v_off: float, width: int = 900,
     if start_finish is None:
         out.append(label(0, 30, "スタート / ゴール（0 m）", weight="bold"))
     else:
-        out.append(label(0, 30, "コントロールライン（0 m）", weight="bold"))
+        out.append(label(0, 30, "0 m（ID 1）", weight="bold"))
         for pos, text in zip(start_finish, ("発進", "ゴール")):
             if pos is None:
                 continue

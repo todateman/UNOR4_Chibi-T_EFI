@@ -11,7 +11,7 @@
 <polygon points="9,0 -7,-7 -7,7" fill="#111827" transform="translate(351.7,522.7) rotate(62.8)"/>
 <polygon points="9,0 -7,-7 -7,7" fill="#111827" transform="translate(553.0,315.6) rotate(-128.7)"/>
 <line x1="322.6" y1="431.2" x2="294.2" y2="445.9" stroke="#111827" stroke-width="4"/>
-<text x="281.7" y="452.3" text-anchor="end" dominant-baseline="middle" font-size="15" font-weight="bold" fill="#111827" stroke="#ffffff" stroke-width="4" paint-order="stroke">コントロールライン（0 m）</text>
+<text x="281.7" y="452.3" text-anchor="end" dominant-baseline="middle" font-size="15" font-weight="bold" fill="#111827" stroke="#ffffff" stroke-width="4" paint-order="stroke">0 m（ID 1）</text>
 <line x1="372.4" y1="536.6" x2="397.3" y2="523.8" stroke="#111827" stroke-width="3" stroke-dasharray="5 3"/>
 <text x="402.6" y="521.0" text-anchor="start" dominant-baseline="middle" font-size="13" font-weight="normal" fill="#111827" stroke="#ffffff" stroke-width="4" paint-order="stroke">発進（160 m）</text>
 <line x1="278.7" y1="357.5" x2="303.4" y2="344.5" stroke="#111827" stroke-width="3" stroke-dasharray="5 3"/>

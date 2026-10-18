@@ -1,10 +1,13 @@
 {
   "_comment": "2026 全国大会（もてぎオーバル）用。練習走行後に fit-coast / fit-burn の出力で vehicle と burn を書き換える",
-  "format_version": 2,
+  "format_version": 3,
   "course": {
     "waypoints": "motegi_waypoint.csv",
     "laps": 7,
     "total_m": 16389.68,
+    "_start_finish": "コントロールライン（ID 1）からの距離。発進・ゴールとも周回路の内側の別レーンで、2022 年 No.180 の車載動画（ゴール通過時刻が公式記録と一致）と自チームの 2024・2025 本番ログから。コースウォークで測り直す",
+    "start_m": 160,
+    "finish_m": 2224,
     "limit_s": 2360.11,
     "no_burn_zones_m": [[1500, 2150], [1350, 2150]],
     "guard_kmh": 16.0,

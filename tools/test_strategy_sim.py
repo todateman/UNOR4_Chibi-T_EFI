@@ -356,7 +356,8 @@ class TestSimulate(unittest.TestCase):
         self.assertEqual(len(r["crossings"]), self.p["course"]["laps"])
 
     def test_place_marks(self):
-        lap_target = self.p["target_s"] / self.p["course"]["laps"] * 0.97
+        lap_target = ss.steady_lap_target(self.p["course"], self.course, self.p["target_s"])
+        self.assertGreater(lap_target, self.p["target_s"] / self.p["course"]["laps"] * 0.97)
         placed = ss.place_marks(self.p, self.course, 3, lap_target, 17.0, grid=300, sweeps=1)
         self.assertIsNotNone(placed)
         marks, v_off = placed
@@ -377,7 +378,9 @@ class TestSimulate(unittest.TestCase):
         trace = []
         r = ss.simulate(self.p, self.course, 35.0, marks=first, v_on=16.0,
                         switches=[(4, 32.5, self.marks)], trace=trace, trace_every=1)
-        for lap, pos, _ in r["starts"][1:]:
+        for lap, pos, kmh in r["starts"][1:]:
+            if kmh <= 16.5:
+                continue                     # 保険の加速（最低限界速度）は目印と関係なく入る
             marks = first if lap < 4 else self.marks
             self.assertLess(min(abs(pos - m) for m in marks), 5.0, (lap, pos))
         top = {n: max(kmh for _, _, lap, _, kmh, _, _ in trace if lap == n) for n in (3, 4)}
@@ -392,7 +395,35 @@ class TestSimulate(unittest.TestCase):
         slow = dict(kw, crr_scale=1.2, k_scale=1.2)
         open_loop = ss.simulate(self.p, self.course, 35.0, **slow)
         closed = ss.simulate(self.p, self.course, 35.0, pace=cum, **slow)
-        self.assertLess(closed["time_s"], open_loop["time_s"] - 15)
+        # 合計ではなく最終周に入る通過で比べる（間に合っていれば最終周は惰行で終えるため）
+        self.assertLess(closed["crossings"][-2][0], open_loop["crossings"][-2][0] - 15)
+
+    def test_start_and_finish_off_the_control_line(self):
+        c = self.p["course"]
+        lap = self.course.lap_m
+        self.assertEqual(ss.race_span(c, lap), (160.0, 6 * lap + 2224.0, False))
+        trace = []
+        r = ss.simulate(self.p, self.course, 32.5, marks=[100.0, 800.0, 1400.0], v_on=16.0,
+                        trace=trace, trace_every=1)
+        # コントロールラインは 6 回通過し、最後の要素がゴール
+        self.assertEqual(len(r["crossings"]), c["laps"])
+        self.assertEqual(r["crossings"][-1][0], r["time_s"])
+        self.assertLess(r["crossings"][-2][0], r["time_s"] - 200)
+        self.assertEqual(r["starts"][0], (1, 160.0, 0.0))
+        self.assertAlmostEqual(trace[-1][1], 6 * lap + 2224.0, delta=2.0)
+        # 発進位置より手前の目印（100 m）は 1 周目には来ず、2 周目から使う
+        firsts = [(lap_no, round(pos)) for lap_no, pos, kmh in r["starts"][1:] if kmh > 16.5]
+        self.assertNotIn(1, [n for n, pos in firsts if pos < 160])
+        self.assertIn((2, 100), [(n, round(pos, -1)) for n, pos in firsts])
+
+    def test_without_start_and_finish_runs_whole_laps(self):
+        c = {k: v for k, v in self.p["course"].items() if k not in ("start_m", "finish_m")}
+        p = dict(self.p, course=c)
+        lap = self.course.lap_m
+        self.assertEqual(ss.race_span(c, lap), (0.0, 7 * lap, True))
+        r = ss.simulate(p, self.course, 32.5, marks=self.marks, v_on=16.0)
+        self.assertEqual(len(r["crossings"]), 7)
+        self.assertGreater(r["time_s"], self.base["time_s"] + 20)    # 約 270 m 長い
 
     def test_plan_from_params(self):
         self.assertIsNone(ss.plan_from_params(self.p))

@@ -30,6 +30,10 @@ optimize は 0 / 0.5 / 1 の感度を必ず併記する。燃料は ECU 積算�
 
 from_lap 周目からその停止速度・加速開始位置で走る。plan サブコマンドは探索をせず、このプランを評価する。
 
+コース距離は、ロガーが周回を数えるコントロールライン（ウェイポイント ID 1）を 0 とする。course に
+start_m（発進位置）と finish_m（ゴールラインの位置）を書くと、そこから発進し、コントロールラインを
+laps - 1 回通過したあと finish_m でゴールする（race_span）。
+
 ロガー（Chibi-T_Furoshiki_Logger）の tools/make_strategy_json.py が、このファイルとパラメータ JSON を
 読み込んで走行支援の設定ファイルを作る。形式が変わったことを向こうで検知できるよう、版数を 2 つ持つ:
 
@@ -57,10 +61,10 @@ G = 9.80665
 
 # ロガー側の tools/make_strategy_json.py が照合する版数。次のどれかを変えたら上げる:
 #   - 推奨パターンの選び方（cmd_optimize。ロガー側は同じ手順を写して持っている）
-#   - load_params / course_from_params / plan_from_params / simulate / evaluate / pick / place_marks
-#     の引数・戻り値
+#   - load_params / course_from_params / race_span / steady_lap_target / plan_from_params / simulate /
+#     evaluate / pick / place_marks の引数・戻り値
 #   - JITTER / HOME_MARGIN_S の意味
-INTERFACE_VERSION = 2
+INTERFACE_VERSION = 3
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +182,22 @@ def course_from_params(p: dict, waypoints: str | None = None) -> Course:
     c = p["course"]
     path = waypoints or os.path.join(p["_dir"], c["waypoints"])
     return Course(path, c["total_m"] / c["laps"])
+
+
+def race_span(c: dict, lap: float, laps: int | None = None):
+    """(発進位置 m, ゴールまでの通算距離 m, ゴールがコントロールライン上か)。
+
+    コース距離はコントロールライン（ウェイポイント ID 1、ロガーが周回を数える線）を 0 とする。
+    course の start_m（発進位置）と finish_m（ゴールラインの位置）が無ければ、コントロールラインから
+    発進して規定周回ちょうどでゴールする。finish_m があるときは、コントロールラインを laps - 1 回
+    通過したあと finish_m でゴールする（もてぎは発進もゴールも周回路の内側の別レーン）。
+    """
+    n = laps if laps is not None else c["laps"]
+    s0 = float(c.get("start_m", 0.0))
+    fin = c.get("finish_m")
+    if fin is None:
+        return s0, n * lap, True
+    return s0, (n - 1) * lap + float(fin), False
 
 
 def coast_step(course: Course, s: float, v: float, crr: float, k: float, dt_s: float):
@@ -613,6 +633,8 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
 
     最終盤は、惰行だけでゴールに届き、かつ規定時間まで HOME_MARGIN_S 以上残ると分かった
     時点で以降加速しない。
+    発進位置とゴール位置は race_span() で決まる。戻り値の crossings はコントロールラインの通過
+    ごとの (累積時間, 燃料, 加速回数) で、最後の要素はゴール（コントロールライン上でなくても足す）。
     pace に各周通過の目標累積時間を渡すと、通過のたびに pace_bump() で停止速度を補正する。
     switches に [(周, 停止速度 km/h, marks), ...] を渡すと、その周に入るときに停止速度と
     加速開始位置を替える（周は 1 始まり）。
@@ -627,19 +649,23 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
     extra = beta * burn["drum_decel"]
     xs, acc, frate = burn["speed_kmh"], burn["accel_drum"], burn["fuel_ml_s"]
     lap = course.lap_m
-    total = lap * (laps if laps is not None else c["laps"])
+    s0, total, goal_on_line = race_span(c, lap, laps)
     vfin = c.get("finish_min_kmh", 12.0) / 3.6
     # 失敗させる再始動（発進を除く通し番号）。序盤・中盤・終盤に散らす
     fail_at = {2 + 7 * i for i in range(fail_restarts)}
     marks = sorted(m % lap for m in marks)
-    mi, mlap = 0, 0
+    # 発進位置より手前の目印は 1 周目には来ない
+    mi, mlap = bisect.bisect_right(marks, s0), 0
+    if mi == len(marks):
+        mi, mlap = 0, 1
     switches = sorted(switches, key=lambda sw: sw[0])
 
-    t = s = v = 0.0
+    t = v = 0.0
+    s = s0
     fuel = rst["fuel_ml"]
     state, dead, burns, restarts, burn_time = "burn", 0.0, 1, 0, 0.0
     home = launched = False
-    crossings, starts = [], [(1, 0.0, 0.0)]
+    crossings, starts = [], [(1, s0, 0.0)]
     vmin = float("inf")
     bump = 0.0
     step = 0
@@ -698,6 +724,8 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
         if trace is not None and step % trace_every == 0:
             trace.append((round(t, 1), round(s, 1), int(s // lap) + 1, round(s % lap, 1),
                           round(v * 3.6, 2), state, round(fuel, 3)))
+    if not goal_on_line:
+        crossings.append((t, fuel, burns))     # 最後の要素は常にゴール
     return {"time_s": t, "fuel_ml": fuel, "burns": burns, "burn_time_s": burn_time,
             "crossings": crossings, "starts": starts, "finish_kmh": v * 3.6, "min_kmh": vmin}
 
@@ -815,6 +843,15 @@ def fit_v_off(p, course, marks, lap_target_s, floor_kmh, lo=26.0, hi=40.0, iters
     return (hi, f) if abs(n - len(marks)) < 0.01 else None
 
 
+def steady_lap_target(c: dict, course: Course, target_s: float) -> float:
+    """定常周回の目標時間。発進周と惰行で終える最終周の遅れを見込んで 3% 詰める。
+
+    発進位置・ゴール位置で決まる実際の走行距離を、周回数に換算して割る。
+    """
+    s0, total, _ = race_span(c, course.lap_m)
+    return target_s / ((total - s0) / course.lap_m) * 0.97
+
+
 def _gap_ok(marks, lap, min_gap) -> bool:
     m = sorted(marks)
     return all((m[(i + 1) % len(m)] - m[i]) % lap >= min_gap for i in range(len(m))) or len(m) == 1
@@ -851,6 +888,14 @@ def _pol_text(pol: dict) -> str:
                              for lap, v, ms in pol.get("switches", ())])
     return "ON %.0f / OFF %.0f km/h  禁止 %d-%d m" % (
         pol["v_on"], pol["v_off"], pol["zone"][0], pol["zone"][1])
+
+
+def _span_text(c: dict, course: Course) -> str:
+    s0, total, on_line = race_span(c, course.lap_m)
+    if on_line and not s0:
+        return "発進・ゴールともコントロールライン上"
+    return ("発進 %.0f m・ゴール %.0f m（コントロールラインからの距離）、走行距離 %.0f m（公式距離との差 %+.0f m）"
+            % (s0, total % course.lap_m if not on_line else course.lap_m, total - s0, total - s0 - c["total_m"]))
 
 
 def _line(r: dict, total_m: float) -> str:
@@ -934,6 +979,7 @@ def cmd_plan(args) -> int:
     rec = evaluate(p, course, pol)
     print("規定 %s / %d 周 %.2f m / 保険の加速開始 %.0f km/h"
           % (mmss(limit), c["laps"], c["total_m"], pol["v_on"]))
+    print(_span_text(c, course))
     print("（時間は開始位置を ±30 m ずらした 3 通りの最短〜最長、燃料は平均、加速回数は最大）")
     print("  %s  最低 %.1f km/h" % (_line(rec, c["total_m"]), rec["min_kmh"]))
     worst = _report(p, course, rec, args, limit, "プラン")
@@ -947,7 +993,7 @@ def cmd_optimize(args) -> int:
     target = parse_mmss(args.target) if args.target else p["target_s"]
     limit, guard = c["limit_s"], c.get("guard_kmh", 16.0)
     # 発進周と惰行で終える最終周は定常周回より遅いので、定常周回はその分だけ詰めておく
-    lap_target = target / c["laps"] * 0.97
+    lap_target = steady_lap_target(c, course, target)
     results = []
     for n in range(args.n_min, args.n_max + 1):
         placed = place_marks(p, course, n, lap_target, guard + 1.0)
@@ -965,6 +1011,7 @@ def cmd_optimize(args) -> int:
     best, rec = pick(results, target, args.fuel_slack)
     print("目標 %s / 規定 %s / %d 周 %.2f m / 保険の加速開始 %.0f km/h"
           % (mmss(target), mmss(limit), c["laps"], c["total_m"], guard))
+    print(_span_text(c, course))
     print("（時間は開始位置を ±30 m ずらした 3 通りの最短〜最長、燃料は平均、加速回数は最大）")
     for r in results:
         print("  1 周 %d 回: %s  最低 %.1f km/h"

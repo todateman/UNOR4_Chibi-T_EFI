@@ -1,20 +1,25 @@
 {
   "_comment": "2026 全国大会（もてぎオーバル）用。練習走行後に fit-coast / fit-burn の出力で vehicle と burn を書き換える",
-  "format_version": 2,
+  "format_version": 3,
   "course": {
     "waypoints": "motegi_waypoint.csv",
     "laps": 7,
     "total_m": 16389.68,
+    "_start_finish": "ウェイポイント ID 1 からの距離（ロガーのコントロールラインは約 7 m 手前）。発進・ゴールとも周回路の内側の別レーンで、2022 年 No.180 の車載動画（ゴール通過時刻が公式記録と一致）と自チームの 2024・2025 本番ログから。コースウォークで測り直す",
+    "start_m": 160,
+    "finish_m": 2224,
     "limit_s": 2360.11,
     "no_burn_zones_m": [[1500, 2150], [1350, 2150]],
     "guard_kmh": 16.0,
     "finish_min_kmh": 12.0
   },
   "target_s": 2310.0,
+  "_fuel_slack": "推奨パターンを選ぶとき、燃料最小からこの割合までは加速回数（再始動）の少なさを優先する。モデルの燃料の不確かさが約 6% なので 6%",
+  "fuel_slack": 0.06,
   "vehicle": {
-    "_source": "fit-coast: 2024 本番 LOG0369 + 2025 本番 LOG0503 の惰行",
+    "_source": "fit-coast: 2024 本番 LOG0369 + 2025 本番 LOG0503 の惰行（標高は fit-grade で推定し直したウェイポイント）",
     "crr": 0.00164,
-    "k_aero": 0.000391,
+    "k_aero": 0.000384,
     "mass_kg": 105.0
   },
   "burn": {

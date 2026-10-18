@@ -141,6 +141,77 @@ class TestFitCoast(unittest.TestCase):
         self.assertLess(rms, 1.0)
 
 
+def coast_rows(course, crr, k, starts, v0=36.0, v1=15.0):
+    """starts の各位置から v0 → v1 km/h まで惰行したログ行（0.2 s ごと、速度は 0.1 km/h に丸め）。"""
+    rows, t, odo = [], 0.0, 0.0
+    for start in starts:
+        rows.append({"t": t, "v": v0, "rpm": 3000.0, "dist": round(odo), "lat": 0, "lng": 0})
+        t += 1.0
+        s, v = start, v0 / 3.6
+        while v * 3.6 > v1:
+            lat, lng = circle_latlng(s % LAP)
+            rows.append({"t": t, "v": round(v * 3.6, 1), "rpm": 0.0,
+                         "dist": round(odo, 1), "lat": lat, "lng": lng})
+            for _ in range(4):
+                s2, v = ss.coast_step(course, s, v, crr, k, 0.05)
+                odo += s2 - s
+                s = s2
+            t += 0.2
+    return rows
+
+
+class TestFitGrade(unittest.TestCase):
+    def test_recovers_altitude_from_coasting(self):
+        with tempfile.TemporaryDirectory() as d:
+            truth = ss.Course(write_course(d, 1.5), LAP)
+            flat = ss.Course(write_course(d, 0.0), LAP)   # ウェイポイントの標高は平ら（間違い）
+        starts = [i * 150.0 for i in range(16)]
+        sets = [ss.coast_spans(coast_rows(truth, 0.0020, 0.00040, starts), flat),
+                ss.coast_spans(coast_rows(truth, 0.0030, 0.00030, starts[::2]), flat)]
+        fit = ss.GradeFit(flat, 50.0)
+        r = fit.solve(sets, [("wp", list(zip(flat.s, flat.alt)), 5.0)])
+        for s in range(0, int(LAP), 100):
+            self.assertAlmostEqual(fit.alt_at(s), truth.alt_at(s), delta=0.1, msg=s)
+        (v1, v2) = r["vehicles"]
+        self.assertAlmostEqual(v1["crr"], 0.0020, delta=0.0002)
+        self.assertAlmostEqual(v2["crr"], 0.0030, delta=0.0003)
+        self.assertAlmostEqual(v1["k"], 0.00040, delta=0.00004)
+
+    def test_altitude_prior_alone_is_followed(self):
+        # 惰行が無ければ、標高の測定値（オフセットは自由）に沿う
+        with tempfile.TemporaryDirectory() as d:
+            flat = ss.Course(write_course(d, 0.0), LAP)
+        meas = [(s, 7.0 + 1.0 * math.sin(2 * math.pi * s / LAP)) for s in range(0, int(LAP), 25)]
+        fit = ss.GradeFit(flat, 50.0)
+        fit.solve([], [("wp", list(zip(flat.s, flat.alt)), 10.0), ("gps", meas, 0.1)])
+        for s in (0, 600, 1200, 1800):
+            self.assertAlmostEqual(fit.alt_at(s), 100.0 + math.sin(2 * math.pi * s / LAP), delta=0.05)
+
+    def test_write_waypoints_replaces_only_alt(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "src.csv")
+            with open(src, "wb") as f:
+                f.write("﻿ID,lat,lng,alt,distance\r\n".encode("utf-8"))
+                for i in range(N_WP):
+                    s = i * LAP / N_WP
+                    lat, lng = circle_latlng(s)
+                    f.write(("%d,%.6f,%.6f,100.00,%.0f\r\n" % (i + 1, lat, lng, s)).encode())
+            course = ss.Course(src, LAP)
+            dst = os.path.join(d, "dst.csv")
+            ss.write_waypoints(src, dst, course, lambda s: 100.0 + s / 1000.0)
+            a = open(src, "rb").read().split(b"\r\n")
+            b = open(dst, "rb").read().split(b"\r\n")
+        self.assertTrue(b[0].startswith(b"\xef\xbb\xbf"))
+        self.assertEqual(len(a), len(b))
+        for x, y in zip(a[1:], b[1:]):
+            if not x:
+                self.assertEqual(x, y)
+                continue
+            xs, ys = x.split(b","), y.split(b",")
+            self.assertEqual(xs[:3] + xs[4:], ys[:3] + ys[4:])
+        self.assertEqual(b[101].split(b",")[3], b"100.80")
+
+
 HEADERS = {
     # 2024 年（11 列）
     11: "記録日時,速度(km/h),ラップ数(周目),走行時間(秒),回転数(rpm),走行距離積算(m),"
@@ -268,7 +339,8 @@ class TestSimulate(unittest.TestCase):
         r = ss.simulate(self.p, self.course, 32.5, marks=self.marks, v_on=16.0,
                         crr_scale=1.2, k_scale=1.2)
         last = [pos for lap, pos, _ in r["starts"] if lap == self.p["course"]["laps"]]
-        self.assertTrue(any(abs(pos - 1400.0) < 5.0 for pos in last), last)
+        # 最後の目印（1400 m）か、その手前で最低限界速度に落ちたところで 3 回目を加速する
+        self.assertTrue(any(1300.0 < pos < 1405.0 for pos in last), last)
         self.assertLess(r["time_s"], self.p["course"]["limit_s"])
 
     def test_failed_restarts_cost_little_time(self):
@@ -285,7 +357,8 @@ class TestSimulate(unittest.TestCase):
         self.assertEqual(len(r["crossings"]), self.p["course"]["laps"])
 
     def test_place_marks(self):
-        lap_target = self.p["target_s"] / self.p["course"]["laps"] * 0.97
+        lap_target = ss.steady_lap_target(self.p["course"], self.course, self.p["target_s"])
+        self.assertGreater(lap_target, self.p["target_s"] / self.p["course"]["laps"] * 0.97)
         placed = ss.place_marks(self.p, self.course, 3, lap_target, 17.0, grid=300, sweeps=1)
         self.assertIsNotNone(placed)
         marks, v_off = placed
@@ -306,7 +379,9 @@ class TestSimulate(unittest.TestCase):
         trace = []
         r = ss.simulate(self.p, self.course, 35.0, marks=first, v_on=16.0,
                         switches=[(4, 32.5, self.marks)], trace=trace, trace_every=1)
-        for lap, pos, _ in r["starts"][1:]:
+        for lap, pos, kmh in r["starts"][1:]:
+            if kmh <= 16.5:
+                continue                     # 保険の加速（最低限界速度）は目印と関係なく入る
             marks = first if lap < 4 else self.marks
             self.assertLess(min(abs(pos - m) for m in marks), 5.0, (lap, pos))
         top = {n: max(kmh for _, _, lap, _, kmh, _, _ in trace if lap == n) for n in (3, 4)}
@@ -321,7 +396,35 @@ class TestSimulate(unittest.TestCase):
         slow = dict(kw, crr_scale=1.2, k_scale=1.2)
         open_loop = ss.simulate(self.p, self.course, 35.0, **slow)
         closed = ss.simulate(self.p, self.course, 35.0, pace=cum, **slow)
-        self.assertLess(closed["time_s"], open_loop["time_s"] - 15)
+        # 合計ではなく最終周に入る通過で比べる（間に合っていれば最終周は惰行で終えるため）
+        self.assertLess(closed["crossings"][-2][0], open_loop["crossings"][-2][0] - 15)
+
+    def test_start_and_finish_off_the_control_line(self):
+        c = self.p["course"]
+        lap = self.course.lap_m
+        self.assertEqual(ss.race_span(c, lap), (160.0, 6 * lap + 2224.0, False))
+        trace = []
+        r = ss.simulate(self.p, self.course, 32.5, marks=[100.0, 800.0, 1400.0], v_on=16.0,
+                        trace=trace, trace_every=1)
+        # コントロールラインは 6 回通過し、最後の要素がゴール
+        self.assertEqual(len(r["crossings"]), c["laps"])
+        self.assertEqual(r["crossings"][-1][0], r["time_s"])
+        self.assertLess(r["crossings"][-2][0], r["time_s"] - 200)
+        self.assertEqual(r["starts"][0], (1, 160.0, 0.0))
+        self.assertAlmostEqual(trace[-1][1], 6 * lap + 2224.0, delta=2.0)
+        # 発進位置より手前の目印（100 m）は 1 周目には来ず、2 周目から使う
+        firsts = [(lap_no, round(pos)) for lap_no, pos, kmh in r["starts"][1:] if kmh > 16.5]
+        self.assertNotIn(1, [n for n, pos in firsts if pos < 160])
+        self.assertIn((2, 100), [(n, round(pos, -1)) for n, pos in firsts])
+
+    def test_without_start_and_finish_runs_whole_laps(self):
+        c = {k: v for k, v in self.p["course"].items() if k not in ("start_m", "finish_m")}
+        p = dict(self.p, course=c)
+        lap = self.course.lap_m
+        self.assertEqual(ss.race_span(c, lap), (0.0, 7 * lap, True))
+        r = ss.simulate(p, self.course, 32.5, marks=self.marks, v_on=16.0)
+        self.assertEqual(len(r["crossings"]), 7)
+        self.assertGreater(r["time_s"], self.base["time_s"] + 20)    # 約 270 m 長い
 
     def test_plan_from_params(self):
         self.assertIsNone(ss.plan_from_params(self.p))

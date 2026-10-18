@@ -2,6 +2,8 @@
 """もてぎオーバルの加速・惰行パターンを試算する走行シミュレータ。
 
     python3 tools/strategy_sim.py fit-coast LOG0369.CSV LOG0503.CSV   # 実走の惰行から走行抵抗
+    python3 tools/strategy_sim.py fit-grade LOG0369.CSV LOG0503.CSV --alt-csv alt.csv --out wp.csv
+                                                                      # 惰行と標高の測定から周回の標高
     python3 tools/strategy_sim.py fit-burn LOG0645.CSV                # ドラムから加速度・燃料流量
     python3 tools/strategy_sim.py optimize --target 38:30             # 加速・惰行パターンの探索
     python3 tools/strategy_sim.py --params tools/strategy/practice_motegi_2026.json plan   # JSON に書いたプランの確認
@@ -27,6 +29,11 @@ optimize は 0 / 0.5 / 1 の感度を必ず併記する。燃料は ECU 積算�
                {"from_lap": 4, "v_off": 32.5, "marks_m": [400, 800, 1400]}]
 
 from_lap 周目からその停止速度・加速開始位置で走る。plan サブコマンドは探索をせず、このプランを評価する。
+
+コース距離はウェイポイント ID 1 を 0 とし、ID 1 の通過を周回の通過とする（ロガーのコントロールラインは
+その約 7 m 手前で、通過は約 1 秒早い）。course に
+start_m（発進位置）と finish_m（ゴールラインの位置）を書くと、そこから発進し、コントロールラインを
+laps - 1 回通過したあと finish_m でゴールする（race_span）。
 
 ロガー（Chibi-T_Furoshiki_Logger）の tools/make_strategy_json.py が、このファイルとパラメータ JSON を
 読み込んで走行支援の設定ファイルを作る。形式が変わったことを向こうで検知できるよう、版数を 2 つ持つ:
@@ -55,10 +62,10 @@ G = 9.80665
 
 # ロガー側の tools/make_strategy_json.py が照合する版数。次のどれかを変えたら上げる:
 #   - 推奨パターンの選び方（cmd_optimize。ロガー側は同じ手順を写して持っている）
-#   - load_params / course_from_params / plan_from_params / simulate / evaluate / pick / place_marks
-#     の引数・戻り値
+#   - load_params / course_from_params / race_span / steady_lap_target / fuel_slack / plan_from_params /
+#     simulate / evaluate / pick / place_marks の引数・戻り値
 #   - JITTER / HOME_MARGIN_S の意味
-INTERFACE_VERSION = 2
+INTERFACE_VERSION = 3
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +185,23 @@ def course_from_params(p: dict, waypoints: str | None = None) -> Course:
     return Course(path, c["total_m"] / c["laps"])
 
 
+def race_span(c: dict, lap: float, laps: int | None = None):
+    """(発進位置 m, ゴールまでの通算距離 m, ゴールがコントロールライン上か)。
+
+    コース距離はウェイポイント ID 1 を 0 とし、ここの通過を周回の通過とする（ロガーのコントロールラインは
+    約 7 m 手前）。
+    course の start_m（発進位置）と finish_m（ゴールラインの位置）が無ければ、コントロールラインから
+    発進して規定周回ちょうどでゴールする。finish_m があるときは、コントロールラインを laps - 1 回
+    通過したあと finish_m でゴールする（もてぎは発進もゴールも周回路の内側の別レーン）。
+    """
+    n = laps if laps is not None else c["laps"]
+    s0 = float(c.get("start_m", 0.0))
+    fin = c.get("finish_m")
+    if fin is None:
+        return s0, n * lap, True
+    return s0, (n - 1) * lap + float(fin), False
+
+
 def coast_step(course: Course, s: float, v: float, crr: float, k: float, dt_s: float):
     a = -(G * (crr + course.slope(s)) + k * v * v)
     v = max(v + a * dt_s, 0.0)
@@ -246,6 +270,13 @@ def _split(rows: list, pred, gap_s: float, tkey: str = "t") -> list:
 def coast_windows(rows: list, course: Course, win_m: float = 250.0,
                   skip_s: float = 3.0, min_kmh: float = 14.0) -> list:
     """惰行区間を win_m ごとに区切ったエネルギー収支 (g*ds, ∫v^2 ds, 失ったエネルギー)。"""
+    return [(G * ds, iv, dke - G * (hb - ha))
+            for _, _, ds, iv, dke, ha, hb in coast_spans(rows, course, win_m, skip_s, min_kmh)]
+
+
+def coast_spans(rows: list, course: Course, win_m: float = 250.0,
+                skip_s: float = 3.0, min_kmh: float = 14.0) -> list:
+    """惰行区間を win_m ごとに区切った (始点 s, 終点 s, ds, ∫v^2 ds, -Δ(v^2/2), 始点の標高, 終点の標高)。"""
     out = []
     for seg in _split(rows, lambda r: r["rpm"] == 0 and r["v"] >= min_kmh, gap_s=5.0):
         # エンジン停止直後はクラッチ・エンジンの引きずりが残る
@@ -259,15 +290,15 @@ def coast_windows(rows: list, course: Course, win_m: float = 250.0,
             if ds < 0.8 * win_m:
                 break
             a, b = seg[i], seg[j]
-            _, ha, off_a = course.nearest(a["lat"], a["lng"])
-            _, hb, off_b = course.nearest(b["lat"], b["lng"])
+            sa, ha, off_a = course.nearest(a["lat"], a["lng"])
+            sb, hb, off_b = course.nearest(b["lat"], b["lng"])
             if max(off_a, off_b) <= 30.0:   # コース外（ピットなど）は使わない
                 iv = 0.0
                 for q in range(i, j):
                     vm = (seg[q]["v"] + seg[q + 1]["v"]) / 7.2
                     iv += vm * vm * (seg[q + 1]["dist"] - seg[q]["dist"])
                 va, vb = a["v"] / 3.6, b["v"] / 3.6
-                out.append((G * ds, iv, -((vb * vb - va * va) / 2 + G * (hb - ha))))
+                out.append((sa, sb, ds, iv, -(vb * vb - va * va) / 2, ha, hb))
             i = j
     return out
 
@@ -307,6 +338,200 @@ def cmd_fit_coast(args) -> int:
         v = kmh / 3.6
         print("  %d km/h の減速度(平坦) %.4f m/s2" % (kmh, G * crr + k * v * v))
     print('JSON: "vehicle": {"crr": %.5f, "k_aero": %.6f}' % (crr, k))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# fit-grade: 惰行の減速度と標高の測定値から周回の標高を推定し直す
+# ---------------------------------------------------------------------------
+
+def _solve(a: list, b: list) -> list:
+    """連立一次方程式 a x = b（部分ピボット付きガウス消去）。"""
+    n = len(b)
+    m = [row[:] + [b[i]] for i, row in enumerate(a)]
+    for c in range(n):
+        p = max(range(c, n), key=lambda r: abs(m[r][c]))
+        m[c], m[p] = m[p], m[c]
+        if abs(m[c][c]) < 1e-12:
+            raise ValueError("解が定まりません（惰行区間か標高の測定値が足りません）")
+        for r in range(c + 1, n):
+            f = m[r][c] / m[c][c]
+            if f:
+                for q in range(c, n + 1):
+                    m[r][q] -= f * m[c][q]
+    x = [0.0] * n
+    for c in range(n - 1, -1, -1):
+        x[c] = (m[c][n] - sum(m[c][q] * x[q] for q in range(c + 1, n))) / m[c][c]
+    return x
+
+
+class _Lsq:
+    """1 本ずつ式を足していく重み付き最小二乗（正規方程式）。"""
+
+    def __init__(self, n: int):
+        self.ata = [[0.0] * n for _ in range(n)]
+        self.atb = [0.0] * n
+
+    def add(self, coefs: dict, rhs: float, w: float = 1.0):
+        items = [(j, c * w) for j, c in coefs.items() if c]
+        for j, cj in items:
+            self.atb[j] += cj * rhs * w
+            row = self.ata[j]
+            for q, cq in items:
+                row[q] += cj * cq
+
+    def solve(self) -> list:
+        return _solve(self.ata, self.atb)
+
+
+class GradeFit:
+    """周回の標高を node_m 間隔の節点で表し、次の 3 種類の式をまとめて最小二乗で解く。
+
+    - 惰行の各窓: g*Crr*ds + k*∫v^2 ds + g*(h(終点) - h(始点)) = -Δ(v^2/2)
+      （Crr と k は車両ごと。窓の重みは車両ごとの残差 RMS で決め直す）
+    - 標高の測定値（ウェイポイント・別の GPS の周平均など）: h(s) - 測定ごとのオフセット = 測定値
+    - 隣り合う節点の 2 階差分 = 0（平滑化）
+
+    周で閉じているので一定の勾配は Crr と区別でき、標高の平均はウェイポイントの平均に合わせる。
+    """
+
+    def __init__(self, course: Course, node_m: float = 50.0):
+        self.course = course
+        self.n = max(int(round(course.lap_m / node_m)), 8)
+        self.d = course.lap_m / self.n
+
+    def weights(self, s: float) -> dict:
+        u = (s % self.course.lap_m) / self.d
+        j = int(u) % self.n
+        f = u - int(u)
+        return {j: 1.0 - f, (j + 1) % self.n: f}
+
+    def solve(self, span_sets: list, priors: list, smooth_m: float = 0.05,
+              iters: int = 4, reject: float = 3.0) -> dict:
+        """span_sets: 車両ごとの coast_spans()。priors: [(名前, [(s, 標高)], σ m), ...]"""
+        nv, npr = len(span_sets), len(priors)
+        nx = self.n + 2 * nv + npr
+        sig = [1.0] * nv                    # 窓の残差の目安 J/kg
+        use = [[True] * len(sp) for sp in span_sets]
+        mean_alt = statistics.fmean(self.course.alt)
+        for _ in range(iters):
+            ls = _Lsq(nx)
+            for v, spans in enumerate(span_sets):
+                ic, ik = self.n + 2 * v, self.n + 2 * v + 1
+                for ok, (sa, sb, ds, iv, dke, _, _) in zip(use[v], spans):
+                    if not ok:
+                        continue
+                    co = {ic: G * ds, ik: iv}
+                    for j, w in self.weights(sb).items():
+                        co[j] = co.get(j, 0.0) + G * w
+                    for j, w in self.weights(sa).items():
+                        co[j] = co.get(j, 0.0) - G * w
+                    ls.add(co, dke, 1.0 / sig[v])
+            for q, (_, pts, sigma) in enumerate(priors):
+                io = self.n + 2 * nv + q
+                for s, h in pts:
+                    co = dict(self.weights(s))
+                    co[io] = -1.0
+                    ls.add(co, h, 1.0 / sigma)
+            for j in range(self.n):
+                ls.add({(j - 1) % self.n: 1.0, j: -2.0, (j + 1) % self.n: 1.0}, 0.0, 1.0 / smooth_m)
+            ls.add({j: 1.0 / self.n for j in range(self.n)}, mean_alt, 1e4)
+            x = ls.solve()
+            self.h = x[:self.n]
+            vehicles = []
+            for v, spans in enumerate(span_sets):
+                crr, k = x[self.n + 2 * v], x[self.n + 2 * v + 1]
+                res = [dke - (G * ds * crr + iv * k + G * (self.alt_at(sb) - self.alt_at(sa)))
+                       for sa, sb, ds, iv, dke, _, _ in spans]
+                kept = [r for r, ok in zip(res, use[v]) if ok]
+                rms = math.sqrt(statistics.fmean(r * r for r in kept)) if kept else float("nan")
+                sig[v] = max(rms, 0.05)
+                use[v] = [abs(r) <= reject * sig[v] for r in res]
+                vehicles.append({"crr": crr, "k": k, "rms": rms, "n": len(kept), "all": len(spans)})
+        return {"vehicles": vehicles,
+                "offsets": [x[self.n + 2 * nv + q] for q in range(npr)]}
+
+    def alt_at(self, s: float) -> float:
+        return sum(self.h[j] * w for j, w in self.weights(s).items())
+
+
+def read_alt_csv(path: str) -> list:
+    """(s, 標高) の CSV（列名 s, alt）。"""
+    with open(path, encoding="utf-8-sig") as f:
+        return [(float(r["s"]), float(r["alt"])) for r in csv.DictReader(f)]
+
+
+def write_waypoints(src: str, dst: str, course: Course, alt_at) -> None:
+    """src の alt 列だけを alt_at(コース距離) に置き換えて dst に書く。BOM・改行・他の列はそのまま。"""
+    with open(src, "rb") as f:
+        raw = f.read()
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    text = raw.decode("utf-8-sig")
+    nl = "\r\n" if "\r\n" in text else "\n"
+    lines = text.split(nl)
+    header = lines[0].split(",")
+    ia = header.index("alt")
+    out, i = [lines[0]], 0
+    for line in lines[1:]:
+        if not line.strip():
+            out.append(line)
+            continue
+        cols = line.split(",")
+        cols[ia] = "%.2f" % alt_at(course.s[i])
+        out.append(",".join(cols))
+        i += 1
+    with open(dst, "wb") as f:
+        f.write((b"\xef\xbb\xbf" if bom else b"") + nl.join(out).encode("utf-8"))
+
+
+def cmd_fit_grade(args) -> int:
+    p = load_params(args.params)
+    course = course_from_params(p, args.waypoints)
+    groups = args.groups or list(range(1, len(args.logs) + 1))
+    if len(groups) != len(args.logs):
+        print("--groups の数をログの数に合わせてください")
+        return 1
+    order = sorted(set(groups), key=groups.index)
+    span_sets = [[] for _ in order]
+    names = [[] for _ in order]
+    for path, g in zip(args.logs, groups):
+        span_sets[order.index(g)] += coast_spans(load_log(path), course)
+        names[order.index(g)].append(os.path.basename(path))
+    priors = [("ウェイポイント", list(zip(course.s, course.alt)), args.sigma_wp)]
+    for path in args.alt_csv or ():
+        priors.append((os.path.basename(path), read_alt_csv(path), args.sigma_alt))
+    fit = GradeFit(course, args.node_m)
+    try:
+        r = fit.solve(span_sets, priors, smooth_m=args.smooth)
+    except ValueError as e:
+        print(e)
+        return 1
+    print("節点 %d 個（%.1f m 間隔）  標高の重み: ウェイポイント σ %.2f m、別の測定 σ %.2f m、平滑 %.2f m"
+          % (fit.n, fit.d, args.sigma_wp, args.sigma_alt, args.smooth))
+    for nm, v in zip(names, r["vehicles"]):
+        print("  %s: 区間 %d/%d  Crr=%.5f  k=%.6f /m  残差 %.2f J/kg"
+              % (" + ".join(nm), v["n"], v["all"], v["crr"], v["k"], v["rms"]))
+
+    def prior_at(pts, s):
+        xs = [q[0] for q in pts]
+        i = bisect.bisect_left(xs, s)
+        return pts[min(i, len(pts) - 1)][1]
+
+    cols = [(nm, pts, off) for (nm, pts, _), off in zip(priors, r["offsets"])]
+    print("\n  距離 m  推定 m  " + "  ".join("%s との差" % nm for nm, _, _ in cols))
+    for s in range(0, int(course.lap_m), args.every):
+        h = fit.alt_at(s)
+        diffs = ["%+6.2f" % (h - (prior_at(pts, s) + off)) for _, pts, off in cols]
+        print("  %5d  %6.2f  %s" % (s, h, "  ".join(diffs)))
+    hs = [fit.alt_at(s) for s in course.s]
+    print("\n  高低差 推定 %.2f m / ウェイポイント %.2f m" % (max(hs) - min(hs), max(course.alt) - min(course.alt)))
+    for nm, pts, off in cols:
+        rms = math.sqrt(statistics.fmean((fit.alt_at(s) - (h + off)) ** 2 for s, h in pts))
+        print("  %s との差 RMS %.2f m" % (nm, rms))
+    if args.out:
+        write_waypoints(args.waypoints or os.path.join(p["_dir"], p["course"]["waypoints"]),
+                        args.out, course, fit.alt_at)
+        print("\nalt を差し替えたウェイポイント: %s" % args.out)
     return 0
 
 
@@ -410,6 +635,8 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
 
     最終盤は、惰行だけでゴールに届き、かつ規定時間まで HOME_MARGIN_S 以上残ると分かった
     時点で以降加速しない。
+    発進位置とゴール位置は race_span() で決まる。戻り値の crossings はコントロールラインの通過
+    ごとの (累積時間, 燃料, 加速回数) で、最後の要素はゴール（コントロールライン上でなくても足す）。
     pace に各周通過の目標累積時間を渡すと、通過のたびに pace_bump() で停止速度を補正する。
     switches に [(周, 停止速度 km/h, marks), ...] を渡すと、その周に入るときに停止速度と
     加速開始位置を替える（周は 1 始まり）。
@@ -424,19 +651,23 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
     extra = beta * burn["drum_decel"]
     xs, acc, frate = burn["speed_kmh"], burn["accel_drum"], burn["fuel_ml_s"]
     lap = course.lap_m
-    total = lap * (laps if laps is not None else c["laps"])
+    s0, total, goal_on_line = race_span(c, lap, laps)
     vfin = c.get("finish_min_kmh", 12.0) / 3.6
     # 失敗させる再始動（発進を除く通し番号）。序盤・中盤・終盤に散らす
     fail_at = {2 + 7 * i for i in range(fail_restarts)}
     marks = sorted(m % lap for m in marks)
-    mi, mlap = 0, 0
+    # 発進位置より手前の目印は 1 周目には来ない
+    mi, mlap = bisect.bisect_right(marks, s0), 0
+    if mi == len(marks):
+        mi, mlap = 0, 1
     switches = sorted(switches, key=lambda sw: sw[0])
 
-    t = s = v = 0.0
+    t = v = 0.0
+    s = s0
     fuel = rst["fuel_ml"]
     state, dead, burns, restarts, burn_time = "burn", 0.0, 1, 0, 0.0
     home = launched = False
-    crossings, starts = [], [(1, 0.0, 0.0)]
+    crossings, starts = [], [(1, s0, 0.0)]
     vmin = float("inf")
     bump = 0.0
     step = 0
@@ -495,6 +726,8 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
         if trace is not None and step % trace_every == 0:
             trace.append((round(t, 1), round(s, 1), int(s // lap) + 1, round(s % lap, 1),
                           round(v * 3.6, 2), state, round(fuel, 3)))
+    if not goal_on_line:
+        crossings.append((t, fuel, burns))     # 最後の要素は常にゴール
     return {"time_s": t, "fuel_ml": fuel, "burns": burns, "burn_time_s": burn_time,
             "crossings": crossings, "starts": starts, "finish_kmh": v * 3.6, "min_kmh": vmin}
 
@@ -563,6 +796,11 @@ def evaluate(p: dict, course: Course, pol: dict, **kw) -> dict:
     return r
 
 
+def fuel_slack(p: dict, given: float | None = None) -> float:
+    """推奨を選ぶときの燃料の許容幅。指定 > パラメータの fuel_slack > 0.05。"""
+    return given if given is not None else float(p.get("fuel_slack", 0.05))
+
+
 def pick(results: list, target_s: float, fuel_slack: float = 0.05):
     """(燃料最小, 推奨)。推奨は燃料最小から fuel_slack 以内で加速回数が最も少ない組。
 
@@ -612,6 +850,15 @@ def fit_v_off(p, course, marks, lap_target_s, floor_kmh, lo=26.0, hi=40.0, iters
     return (hi, f) if abs(n - len(marks)) < 0.01 else None
 
 
+def steady_lap_target(c: dict, course: Course, target_s: float) -> float:
+    """定常周回の目標時間。発進周と惰行で終える最終周の遅れを見込んで 3% 詰める。
+
+    発進位置・ゴール位置で決まる実際の走行距離を、周回数に換算して割る。
+    """
+    s0, total, _ = race_span(c, course.lap_m)
+    return target_s / ((total - s0) / course.lap_m) * 0.97
+
+
 def _gap_ok(marks, lap, min_gap) -> bool:
     m = sorted(marks)
     return all((m[(i + 1) % len(m)] - m[i]) % lap >= min_gap for i in range(len(m))) or len(m) == 1
@@ -648,6 +895,14 @@ def _pol_text(pol: dict) -> str:
                              for lap, v, ms in pol.get("switches", ())])
     return "ON %.0f / OFF %.0f km/h  禁止 %d-%d m" % (
         pol["v_on"], pol["v_off"], pol["zone"][0], pol["zone"][1])
+
+
+def _span_text(c: dict, course: Course) -> str:
+    s0, total, on_line = race_span(c, course.lap_m)
+    if on_line and not s0:
+        return "発進・ゴールともコントロールライン上"
+    return ("発進 %.0f m・ゴール %.0f m（ID 1 からの距離）、走行距離 %.0f m（公式距離との差 %+.0f m）"
+            % (s0, total % course.lap_m if not on_line else course.lap_m, total - s0, total - s0 - c["total_m"]))
 
 
 def _line(r: dict, total_m: float) -> str:
@@ -731,6 +986,7 @@ def cmd_plan(args) -> int:
     rec = evaluate(p, course, pol)
     print("規定 %s / %d 周 %.2f m / 保険の加速開始 %.0f km/h"
           % (mmss(limit), c["laps"], c["total_m"], pol["v_on"]))
+    print(_span_text(c, course))
     print("（時間は開始位置を ±30 m ずらした 3 通りの最短〜最長、燃料は平均、加速回数は最大）")
     print("  %s  最低 %.1f km/h" % (_line(rec, c["total_m"]), rec["min_kmh"]))
     worst = _report(p, course, rec, args, limit, "プラン")
@@ -744,7 +1000,7 @@ def cmd_optimize(args) -> int:
     target = parse_mmss(args.target) if args.target else p["target_s"]
     limit, guard = c["limit_s"], c.get("guard_kmh", 16.0)
     # 発進周と惰行で終える最終周は定常周回より遅いので、定常周回はその分だけ詰めておく
-    lap_target = target / c["laps"] * 0.97
+    lap_target = steady_lap_target(c, course, target)
     results = []
     for n in range(args.n_min, args.n_max + 1):
         placed = place_marks(p, course, n, lap_target, guard + 1.0)
@@ -759,9 +1015,11 @@ def cmd_optimize(args) -> int:
                 break
             v_off += 0.5
         results.append(r)
-    best, rec = pick(results, target, args.fuel_slack)
+    slack = fuel_slack(p, args.fuel_slack)
+    best, rec = pick(results, target, slack)
     print("目標 %s / 規定 %s / %d 周 %.2f m / 保険の加速開始 %.0f km/h"
           % (mmss(target), mmss(limit), c["laps"], c["total_m"], guard))
+    print(_span_text(c, course))
     print("（時間は開始位置を ±30 m ずらした 3 通りの最短〜最長、燃料は平均、加速回数は最大）")
     for r in results:
         print("  1 周 %d 回: %s  最低 %.1f km/h"
@@ -771,7 +1029,7 @@ def cmd_optimize(args) -> int:
         return 1
     print("燃料最小: 1 周 %d 回" % len(best["pol"]["marks"]))
     print("推奨    : 1 周 %d 回（燃料最小から %.0f%% 以内で加速回数が最少）"
-          % (len(rec["pol"]["marks"]), args.fuel_slack * 100))
+          % (len(rec["pol"]["marks"]), slack * 100))
     worst = _report(p, course, rec, args, limit)
     return 0 if worst <= limit else 2
 
@@ -789,7 +1047,7 @@ def cmd_speed_rule(args) -> int:
                 if v_off - v_on >= 6:
                     results.append(evaluate(p, course, {"v_off": float(v_off), "v_on": float(v_on),
                                                         "zone": zone}))
-    best, rec = pick(results, target, args.fuel_slack)
+    best, rec = pick(results, target, fuel_slack(p, args.fuel_slack))
     print("目標 %s / 規定 %s" % (mmss(target), mmss(c["limit_s"])))
     print("（時間は開始速度を ±0.5 km/h ずらした 3 通りの最短〜最長、燃料は平均、加速回数は最大）")
     if rec is None:
@@ -876,8 +1134,12 @@ _SLOPE_STYLE = (("up", "#d97706", "登り"), ("flat", "#9ca3af", "平坦"), ("do
 _BURN_COLOR = "#dc2626"
 
 
-def course_svg(course: Course, marks, spans, v_off: float, width: int = 900) -> str:
-    """北を上にしたコース図。勾配で色分けし、加速開始位置と加速区間を重ねる。"""
+def course_svg(course: Course, marks, spans, v_off: float, width: int = 900,
+               start_finish: tuple | None = None) -> str:
+    """北を上にしたコース図。勾配で色分けし、加速開始位置と加速区間を重ねる。
+
+    start_finish = (発進位置 m, ゴール位置 m) を渡すと、内側のレーンにある発進・ゴールの位置を描く。
+    """
     pad_x, top, bottom = 200, 80, 130
     lat0, lng0 = min(course.lat), min(course.lng)
     mx = [(g - lng0) * 111320.0 * course._coslat for g in course.lng]
@@ -898,11 +1160,11 @@ def course_svg(course: Course, marks, spans, v_off: float, width: int = 900) -> 
         d = math.hypot(x1 - x0, y1 - y0)
         return x - (y1 - y0) / d * dist, y + (x1 - x0) / d * dist
 
-    def label(s, dist, text, size=15, weight="normal", fill="#111827"):
+    def label(s, dist, text, size=15, weight="normal", fill="#111827", flip=True):
         x, y = outward(s, dist)
         ox = (x - at(s)[0]) / abs(dist)
         anchor = "start" if ox > 0.35 else "end" if ox < -0.35 else "middle"
-        if dist < 0:
+        if dist < 0 and flip:
             anchor = {"start": "end", "end": "start"}.get(anchor, anchor)
         return ('<text x="%.1f" y="%.1f" text-anchor="%s" dominant-baseline="middle" font-size="%d" '
                 'font-weight="%s" fill="%s" stroke="#ffffff" stroke-width="4" paint-order="stroke">%s</text>'
@@ -947,10 +1209,20 @@ def course_svg(course: Course, marks, spans, v_off: float, width: int = 900) -> 
         out.append('<polygon points="9,0 -7,-7 -7,7" fill="#111827" transform="translate(%.1f,%.1f) rotate(%.1f)"/>'
                    % (x0, y0, ang))
 
-    # スタート / ゴールライン
+    # コントロールライン（周回の通過）と、内側のレーンにある発進・ゴール
     (ax, ay), (bx, by) = outward(0, -16), outward(0, 16)
     out.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="#111827" stroke-width="4"/>' % (ax, ay, bx, by))
-    out.append(label(0, 30, "スタート / ゴール（0 m）", weight="bold"))
+    if start_finish is None:
+        out.append(label(0, 30, "スタート / ゴール（0 m）", weight="bold"))
+    else:
+        out.append(label(0, 30, "0 m（ID 1）", weight="bold"))
+        for pos, text in zip(start_finish, ("発進", "ゴール")):
+            if pos is None:
+                continue
+            (ax, ay), (bx, by) = outward(pos, -12), outward(pos, -40)
+            out.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="#111827" stroke-width="3" '
+                       'stroke-dasharray="5 3"/>' % (ax, ay, bx, by))
+            out.append(label(pos, -46, "%s（%.0f m）" % (text, pos), size=13, flip=False))
 
     # 加速区間と加速開始位置
     for s0, s1, _ in spans:
@@ -994,8 +1266,10 @@ def cmd_map(args) -> int:
     p = load_params(args.params)
     course = course_from_params(p, args.waypoints)
     spans = burn_spans(p, course, args.marks, args.v_off)
+    s0, total, on_line = race_span(p["course"], course.lap_m)
+    sf = None if on_line and not s0 else (s0, None if on_line else total % course.lap_m)
     with open(args.out, "w", encoding="utf-8") as f:
-        f.write(course_svg(course, args.marks, spans, args.v_off))
+        f.write(course_svg(course, args.marks, spans, args.v_off, start_finish=sf))
     print("コース図: %s" % args.out)
     print("番号 | 位置 m | ID | 緯度, 経度 | 加速区間 m")
     for n, m in enumerate(sorted(args.marks), 1):
@@ -1019,6 +1293,19 @@ def main(argv=None) -> int:
     s.add_argument("logs", nargs="+")
     s.set_defaults(func=cmd_fit_coast)
 
+    s = sub.add_parser("fit-grade", help="惰行の減速度と標高の測定値から周回の標高を推定")
+    s.add_argument("logs", nargs="+", help="惰行を含むログ（rpm=0 の行を惰行とみなす）")
+    s.add_argument("--groups", type=int, nargs="+",
+                   help="ログごとの車両番号（同じ番号は Crr・k を共有）。既定はログごとに別")
+    s.add_argument("--alt-csv", nargs="+", help="別の測定の周平均標高（列 s, alt）")
+    s.add_argument("--sigma-wp", type=float, default=0.5, help="ウェイポイント標高の誤差の目安 m")
+    s.add_argument("--sigma-alt", type=float, default=0.3, help="--alt-csv の誤差の目安 m")
+    s.add_argument("--smooth", type=float, default=0.05, help="節点の 2 階差分の許容 m")
+    s.add_argument("--node-m", type=float, default=50.0, help="節点の間隔 m")
+    s.add_argument("--every", type=int, default=100, help="表の刻み m")
+    s.add_argument("--out", help="alt を差し替えたウェイポイント CSV の出力先")
+    s.set_defaults(func=cmd_fit_grade)
+
     s = sub.add_parser("fit-burn", help="ドラムログから加速度・燃料流量を集計")
     s.add_argument("log")
     s.add_argument("--inertia-kg", type=float, default=105.0, help="ドラムの等価慣性質量")
@@ -1028,8 +1315,9 @@ def main(argv=None) -> int:
     s.add_argument("--target", help="目標時間 MM:SS（既定は JSON の target_s）")
     s.add_argument("--n-min", type=int, default=2, help="1 周あたり加速回数の下限")
     s.add_argument("--n-max", type=int, default=5, help="1 周あたり加速回数の上限")
-    s.add_argument("--fuel-slack", type=float, default=0.05,
-                   help="推奨を選ぶとき、燃料最小からこの割合までは加速回数の少なさを優先する")
+    s.add_argument("--fuel-slack", type=float,
+                   help="推奨を選ぶとき、燃料最小からこの割合までは加速回数の少なさを優先する"
+                        "（既定は JSON の fuel_slack、無ければ 0.05）")
     s.add_argument("--fails", type=int, default=3, help="感度に入れる再始動失敗の回数")
     s.add_argument("--trace", help="推奨パターンの速度トレース CSV の出力先")
     s.set_defaults(func=cmd_optimize)
@@ -1045,7 +1333,7 @@ def main(argv=None) -> int:
     s.add_argument("--on-max", type=int, default=24)
     s.add_argument("--off-min", type=int, default=28)
     s.add_argument("--off-max", type=int, default=38)
-    s.add_argument("--fuel-slack", type=float, default=0.05)
+    s.add_argument("--fuel-slack", type=float, help="既定は JSON の fuel_slack、無ければ 0.05")
     s.add_argument("--top", type=int, default=10)
     s.set_defaults(func=cmd_speed_rule)
 

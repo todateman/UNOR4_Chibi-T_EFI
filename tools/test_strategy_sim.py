@@ -141,6 +141,77 @@ class TestFitCoast(unittest.TestCase):
         self.assertLess(rms, 1.0)
 
 
+def coast_rows(course, crr, k, starts, v0=36.0, v1=15.0):
+    """starts の各位置から v0 → v1 km/h まで惰行したログ行（0.2 s ごと、速度は 0.1 km/h に丸め）。"""
+    rows, t, odo = [], 0.0, 0.0
+    for start in starts:
+        rows.append({"t": t, "v": v0, "rpm": 3000.0, "dist": round(odo), "lat": 0, "lng": 0})
+        t += 1.0
+        s, v = start, v0 / 3.6
+        while v * 3.6 > v1:
+            lat, lng = circle_latlng(s % LAP)
+            rows.append({"t": t, "v": round(v * 3.6, 1), "rpm": 0.0,
+                         "dist": round(odo, 1), "lat": lat, "lng": lng})
+            for _ in range(4):
+                s2, v = ss.coast_step(course, s, v, crr, k, 0.05)
+                odo += s2 - s
+                s = s2
+            t += 0.2
+    return rows
+
+
+class TestFitGrade(unittest.TestCase):
+    def test_recovers_altitude_from_coasting(self):
+        with tempfile.TemporaryDirectory() as d:
+            truth = ss.Course(write_course(d, 1.5), LAP)
+            flat = ss.Course(write_course(d, 0.0), LAP)   # ウェイポイントの標高は平ら（間違い）
+        starts = [i * 150.0 for i in range(16)]
+        sets = [ss.coast_spans(coast_rows(truth, 0.0020, 0.00040, starts), flat),
+                ss.coast_spans(coast_rows(truth, 0.0030, 0.00030, starts[::2]), flat)]
+        fit = ss.GradeFit(flat, 50.0)
+        r = fit.solve(sets, [("wp", list(zip(flat.s, flat.alt)), 5.0)])
+        for s in range(0, int(LAP), 100):
+            self.assertAlmostEqual(fit.alt_at(s), truth.alt_at(s), delta=0.1, msg=s)
+        (v1, v2) = r["vehicles"]
+        self.assertAlmostEqual(v1["crr"], 0.0020, delta=0.0002)
+        self.assertAlmostEqual(v2["crr"], 0.0030, delta=0.0003)
+        self.assertAlmostEqual(v1["k"], 0.00040, delta=0.00004)
+
+    def test_altitude_prior_alone_is_followed(self):
+        # 惰行が無ければ、標高の測定値（オフセットは自由）に沿う
+        with tempfile.TemporaryDirectory() as d:
+            flat = ss.Course(write_course(d, 0.0), LAP)
+        meas = [(s, 7.0 + 1.0 * math.sin(2 * math.pi * s / LAP)) for s in range(0, int(LAP), 25)]
+        fit = ss.GradeFit(flat, 50.0)
+        fit.solve([], [("wp", list(zip(flat.s, flat.alt)), 10.0), ("gps", meas, 0.1)])
+        for s in (0, 600, 1200, 1800):
+            self.assertAlmostEqual(fit.alt_at(s), 100.0 + math.sin(2 * math.pi * s / LAP), delta=0.05)
+
+    def test_write_waypoints_replaces_only_alt(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "src.csv")
+            with open(src, "wb") as f:
+                f.write("﻿ID,lat,lng,alt,distance\r\n".encode("utf-8"))
+                for i in range(N_WP):
+                    s = i * LAP / N_WP
+                    lat, lng = circle_latlng(s)
+                    f.write(("%d,%.6f,%.6f,100.00,%.0f\r\n" % (i + 1, lat, lng, s)).encode())
+            course = ss.Course(src, LAP)
+            dst = os.path.join(d, "dst.csv")
+            ss.write_waypoints(src, dst, course, lambda s: 100.0 + s / 1000.0)
+            a = open(src, "rb").read().split(b"\r\n")
+            b = open(dst, "rb").read().split(b"\r\n")
+        self.assertTrue(b[0].startswith(b"\xef\xbb\xbf"))
+        self.assertEqual(len(a), len(b))
+        for x, y in zip(a[1:], b[1:]):
+            if not x:
+                self.assertEqual(x, y)
+                continue
+            xs, ys = x.split(b","), y.split(b",")
+            self.assertEqual(xs[:3] + xs[4:], ys[:3] + ys[4:])
+        self.assertEqual(b[101].split(b",")[3], b"100.80")
+
+
 HEADERS = {
     # 2024 年（11 列）
     11: "記録日時,速度(km/h),ラップ数(周目),走行時間(秒),回転数(rpm),走行距離積算(m),"

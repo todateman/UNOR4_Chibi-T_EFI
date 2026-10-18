@@ -2,6 +2,8 @@
 """もてぎオーバルの加速・惰行パターンを試算する走行シミュレータ。
 
     python3 tools/strategy_sim.py fit-coast LOG0369.CSV LOG0503.CSV   # 実走の惰行から走行抵抗
+    python3 tools/strategy_sim.py fit-grade LOG0369.CSV LOG0503.CSV --alt-csv alt.csv --out wp.csv
+                                                                      # 惰行と標高の測定から周回の標高
     python3 tools/strategy_sim.py fit-burn LOG0645.CSV                # ドラムから加速度・燃料流量
     python3 tools/strategy_sim.py optimize --target 38:30             # 加速・惰行パターンの探索
     python3 tools/strategy_sim.py --params tools/strategy/practice_motegi_2026.json plan   # JSON に書いたプランの確認
@@ -246,6 +248,13 @@ def _split(rows: list, pred, gap_s: float, tkey: str = "t") -> list:
 def coast_windows(rows: list, course: Course, win_m: float = 250.0,
                   skip_s: float = 3.0, min_kmh: float = 14.0) -> list:
     """惰行区間を win_m ごとに区切ったエネルギー収支 (g*ds, ∫v^2 ds, 失ったエネルギー)。"""
+    return [(G * ds, iv, dke - G * (hb - ha))
+            for _, _, ds, iv, dke, ha, hb in coast_spans(rows, course, win_m, skip_s, min_kmh)]
+
+
+def coast_spans(rows: list, course: Course, win_m: float = 250.0,
+                skip_s: float = 3.0, min_kmh: float = 14.0) -> list:
+    """惰行区間を win_m ごとに区切った (始点 s, 終点 s, ds, ∫v^2 ds, -Δ(v^2/2), 始点の標高, 終点の標高)。"""
     out = []
     for seg in _split(rows, lambda r: r["rpm"] == 0 and r["v"] >= min_kmh, gap_s=5.0):
         # エンジン停止直後はクラッチ・エンジンの引きずりが残る
@@ -259,15 +268,15 @@ def coast_windows(rows: list, course: Course, win_m: float = 250.0,
             if ds < 0.8 * win_m:
                 break
             a, b = seg[i], seg[j]
-            _, ha, off_a = course.nearest(a["lat"], a["lng"])
-            _, hb, off_b = course.nearest(b["lat"], b["lng"])
+            sa, ha, off_a = course.nearest(a["lat"], a["lng"])
+            sb, hb, off_b = course.nearest(b["lat"], b["lng"])
             if max(off_a, off_b) <= 30.0:   # コース外（ピットなど）は使わない
                 iv = 0.0
                 for q in range(i, j):
                     vm = (seg[q]["v"] + seg[q + 1]["v"]) / 7.2
                     iv += vm * vm * (seg[q + 1]["dist"] - seg[q]["dist"])
                 va, vb = a["v"] / 3.6, b["v"] / 3.6
-                out.append((G * ds, iv, -((vb * vb - va * va) / 2 + G * (hb - ha))))
+                out.append((sa, sb, ds, iv, -(vb * vb - va * va) / 2, ha, hb))
             i = j
     return out
 
@@ -307,6 +316,200 @@ def cmd_fit_coast(args) -> int:
         v = kmh / 3.6
         print("  %d km/h の減速度(平坦) %.4f m/s2" % (kmh, G * crr + k * v * v))
     print('JSON: "vehicle": {"crr": %.5f, "k_aero": %.6f}' % (crr, k))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# fit-grade: 惰行の減速度と標高の測定値から周回の標高を推定し直す
+# ---------------------------------------------------------------------------
+
+def _solve(a: list, b: list) -> list:
+    """連立一次方程式 a x = b（部分ピボット付きガウス消去）。"""
+    n = len(b)
+    m = [row[:] + [b[i]] for i, row in enumerate(a)]
+    for c in range(n):
+        p = max(range(c, n), key=lambda r: abs(m[r][c]))
+        m[c], m[p] = m[p], m[c]
+        if abs(m[c][c]) < 1e-12:
+            raise ValueError("解が定まりません（惰行区間か標高の測定値が足りません）")
+        for r in range(c + 1, n):
+            f = m[r][c] / m[c][c]
+            if f:
+                for q in range(c, n + 1):
+                    m[r][q] -= f * m[c][q]
+    x = [0.0] * n
+    for c in range(n - 1, -1, -1):
+        x[c] = (m[c][n] - sum(m[c][q] * x[q] for q in range(c + 1, n))) / m[c][c]
+    return x
+
+
+class _Lsq:
+    """1 本ずつ式を足していく重み付き最小二乗（正規方程式）。"""
+
+    def __init__(self, n: int):
+        self.ata = [[0.0] * n for _ in range(n)]
+        self.atb = [0.0] * n
+
+    def add(self, coefs: dict, rhs: float, w: float = 1.0):
+        items = [(j, c * w) for j, c in coefs.items() if c]
+        for j, cj in items:
+            self.atb[j] += cj * rhs * w
+            row = self.ata[j]
+            for q, cq in items:
+                row[q] += cj * cq
+
+    def solve(self) -> list:
+        return _solve(self.ata, self.atb)
+
+
+class GradeFit:
+    """周回の標高を node_m 間隔の節点で表し、次の 3 種類の式をまとめて最小二乗で解く。
+
+    - 惰行の各窓: g*Crr*ds + k*∫v^2 ds + g*(h(終点) - h(始点)) = -Δ(v^2/2)
+      （Crr と k は車両ごと。窓の重みは車両ごとの残差 RMS で決め直す）
+    - 標高の測定値（ウェイポイント・別の GPS の周平均など）: h(s) - 測定ごとのオフセット = 測定値
+    - 隣り合う節点の 2 階差分 = 0（平滑化）
+
+    周で閉じているので一定の勾配は Crr と区別でき、標高の平均はウェイポイントの平均に合わせる。
+    """
+
+    def __init__(self, course: Course, node_m: float = 50.0):
+        self.course = course
+        self.n = max(int(round(course.lap_m / node_m)), 8)
+        self.d = course.lap_m / self.n
+
+    def weights(self, s: float) -> dict:
+        u = (s % self.course.lap_m) / self.d
+        j = int(u) % self.n
+        f = u - int(u)
+        return {j: 1.0 - f, (j + 1) % self.n: f}
+
+    def solve(self, span_sets: list, priors: list, smooth_m: float = 0.05,
+              iters: int = 4, reject: float = 3.0) -> dict:
+        """span_sets: 車両ごとの coast_spans()。priors: [(名前, [(s, 標高)], σ m), ...]"""
+        nv, npr = len(span_sets), len(priors)
+        nx = self.n + 2 * nv + npr
+        sig = [1.0] * nv                    # 窓の残差の目安 J/kg
+        use = [[True] * len(sp) for sp in span_sets]
+        mean_alt = statistics.fmean(self.course.alt)
+        for _ in range(iters):
+            ls = _Lsq(nx)
+            for v, spans in enumerate(span_sets):
+                ic, ik = self.n + 2 * v, self.n + 2 * v + 1
+                for ok, (sa, sb, ds, iv, dke, _, _) in zip(use[v], spans):
+                    if not ok:
+                        continue
+                    co = {ic: G * ds, ik: iv}
+                    for j, w in self.weights(sb).items():
+                        co[j] = co.get(j, 0.0) + G * w
+                    for j, w in self.weights(sa).items():
+                        co[j] = co.get(j, 0.0) - G * w
+                    ls.add(co, dke, 1.0 / sig[v])
+            for q, (_, pts, sigma) in enumerate(priors):
+                io = self.n + 2 * nv + q
+                for s, h in pts:
+                    co = dict(self.weights(s))
+                    co[io] = -1.0
+                    ls.add(co, h, 1.0 / sigma)
+            for j in range(self.n):
+                ls.add({(j - 1) % self.n: 1.0, j: -2.0, (j + 1) % self.n: 1.0}, 0.0, 1.0 / smooth_m)
+            ls.add({j: 1.0 / self.n for j in range(self.n)}, mean_alt, 1e4)
+            x = ls.solve()
+            self.h = x[:self.n]
+            vehicles = []
+            for v, spans in enumerate(span_sets):
+                crr, k = x[self.n + 2 * v], x[self.n + 2 * v + 1]
+                res = [dke - (G * ds * crr + iv * k + G * (self.alt_at(sb) - self.alt_at(sa)))
+                       for sa, sb, ds, iv, dke, _, _ in spans]
+                kept = [r for r, ok in zip(res, use[v]) if ok]
+                rms = math.sqrt(statistics.fmean(r * r for r in kept)) if kept else float("nan")
+                sig[v] = max(rms, 0.05)
+                use[v] = [abs(r) <= reject * sig[v] for r in res]
+                vehicles.append({"crr": crr, "k": k, "rms": rms, "n": len(kept), "all": len(spans)})
+        return {"vehicles": vehicles,
+                "offsets": [x[self.n + 2 * nv + q] for q in range(npr)]}
+
+    def alt_at(self, s: float) -> float:
+        return sum(self.h[j] * w for j, w in self.weights(s).items())
+
+
+def read_alt_csv(path: str) -> list:
+    """(s, 標高) の CSV（列名 s, alt）。"""
+    with open(path, encoding="utf-8-sig") as f:
+        return [(float(r["s"]), float(r["alt"])) for r in csv.DictReader(f)]
+
+
+def write_waypoints(src: str, dst: str, course: Course, alt_at) -> None:
+    """src の alt 列だけを alt_at(コース距離) に置き換えて dst に書く。BOM・改行・他の列はそのまま。"""
+    with open(src, "rb") as f:
+        raw = f.read()
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    text = raw.decode("utf-8-sig")
+    nl = "\r\n" if "\r\n" in text else "\n"
+    lines = text.split(nl)
+    header = lines[0].split(",")
+    ia = header.index("alt")
+    out, i = [lines[0]], 0
+    for line in lines[1:]:
+        if not line.strip():
+            out.append(line)
+            continue
+        cols = line.split(",")
+        cols[ia] = "%.2f" % alt_at(course.s[i])
+        out.append(",".join(cols))
+        i += 1
+    with open(dst, "wb") as f:
+        f.write((b"\xef\xbb\xbf" if bom else b"") + nl.join(out).encode("utf-8"))
+
+
+def cmd_fit_grade(args) -> int:
+    p = load_params(args.params)
+    course = course_from_params(p, args.waypoints)
+    groups = args.groups or list(range(1, len(args.logs) + 1))
+    if len(groups) != len(args.logs):
+        print("--groups の数をログの数に合わせてください")
+        return 1
+    order = sorted(set(groups), key=groups.index)
+    span_sets = [[] for _ in order]
+    names = [[] for _ in order]
+    for path, g in zip(args.logs, groups):
+        span_sets[order.index(g)] += coast_spans(load_log(path), course)
+        names[order.index(g)].append(os.path.basename(path))
+    priors = [("ウェイポイント", list(zip(course.s, course.alt)), args.sigma_wp)]
+    for path in args.alt_csv or ():
+        priors.append((os.path.basename(path), read_alt_csv(path), args.sigma_alt))
+    fit = GradeFit(course, args.node_m)
+    try:
+        r = fit.solve(span_sets, priors, smooth_m=args.smooth)
+    except ValueError as e:
+        print(e)
+        return 1
+    print("節点 %d 個（%.1f m 間隔）  標高の重み: ウェイポイント σ %.2f m、別の測定 σ %.2f m、平滑 %.2f m"
+          % (fit.n, fit.d, args.sigma_wp, args.sigma_alt, args.smooth))
+    for nm, v in zip(names, r["vehicles"]):
+        print("  %s: 区間 %d/%d  Crr=%.5f  k=%.6f /m  残差 %.2f J/kg"
+              % (" + ".join(nm), v["n"], v["all"], v["crr"], v["k"], v["rms"]))
+
+    def prior_at(pts, s):
+        xs = [q[0] for q in pts]
+        i = bisect.bisect_left(xs, s)
+        return pts[min(i, len(pts) - 1)][1]
+
+    cols = [(nm, pts, off) for (nm, pts, _), off in zip(priors, r["offsets"])]
+    print("\n  距離 m  推定 m  " + "  ".join("%s との差" % nm for nm, _, _ in cols))
+    for s in range(0, int(course.lap_m), args.every):
+        h = fit.alt_at(s)
+        diffs = ["%+6.2f" % (h - (prior_at(pts, s) + off)) for _, pts, off in cols]
+        print("  %5d  %6.2f  %s" % (s, h, "  ".join(diffs)))
+    hs = [fit.alt_at(s) for s in course.s]
+    print("\n  高低差 推定 %.2f m / ウェイポイント %.2f m" % (max(hs) - min(hs), max(course.alt) - min(course.alt)))
+    for nm, pts, off in cols:
+        rms = math.sqrt(statistics.fmean((fit.alt_at(s) - (h + off)) ** 2 for s, h in pts))
+        print("  %s との差 RMS %.2f m" % (nm, rms))
+    if args.out:
+        write_waypoints(args.waypoints or os.path.join(p["_dir"], p["course"]["waypoints"]),
+                        args.out, course, fit.alt_at)
+        print("\nalt を差し替えたウェイポイント: %s" % args.out)
     return 0
 
 
@@ -1018,6 +1221,19 @@ def main(argv=None) -> int:
     s = sub.add_parser("fit-coast", help="実走ログの惰行から Crr と k を推定")
     s.add_argument("logs", nargs="+")
     s.set_defaults(func=cmd_fit_coast)
+
+    s = sub.add_parser("fit-grade", help="惰行の減速度と標高の測定値から周回の標高を推定")
+    s.add_argument("logs", nargs="+", help="惰行を含むログ（rpm=0 の行を惰行とみなす）")
+    s.add_argument("--groups", type=int, nargs="+",
+                   help="ログごとの車両番号（同じ番号は Crr・k を共有）。既定はログごとに別")
+    s.add_argument("--alt-csv", nargs="+", help="別の測定の周平均標高（列 s, alt）")
+    s.add_argument("--sigma-wp", type=float, default=0.5, help="ウェイポイント標高の誤差の目安 m")
+    s.add_argument("--sigma-alt", type=float, default=0.3, help="--alt-csv の誤差の目安 m")
+    s.add_argument("--smooth", type=float, default=0.05, help="節点の 2 階差分の許容 m")
+    s.add_argument("--node-m", type=float, default=50.0, help="節点の間隔 m")
+    s.add_argument("--every", type=int, default=100, help="表の刻み m")
+    s.add_argument("--out", help="alt を差し替えたウェイポイント CSV の出力先")
+    s.set_defaults(func=cmd_fit_grade)
 
     s = sub.add_parser("fit-burn", help="ドラムログから加速度・燃料流量を集計")
     s.add_argument("log")

@@ -339,7 +339,8 @@ class TestSimulate(unittest.TestCase):
         r = ss.simulate(self.p, self.course, 32.5, marks=self.marks, v_on=16.0,
                         crr_scale=1.2, k_scale=1.2)
         last = [pos for lap, pos, _ in r["starts"] if lap == self.p["course"]["laps"]]
-        self.assertTrue(any(abs(pos - 1400.0) < 5.0 for pos in last), last)
+        # 最後の目印（1400 m）か、その手前で最低限界速度に落ちたところで 3 回目を加速する
+        self.assertTrue(any(1300.0 < pos < 1405.0 for pos in last), last)
         self.assertLess(r["time_s"], self.p["course"]["limit_s"])
 
     def test_failed_restarts_cost_little_time(self):

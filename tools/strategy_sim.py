@@ -61,8 +61,8 @@ G = 9.80665
 
 # ロガー側の tools/make_strategy_json.py が照合する版数。次のどれかを変えたら上げる:
 #   - 推奨パターンの選び方（cmd_optimize。ロガー側は同じ手順を写して持っている）
-#   - load_params / course_from_params / race_span / steady_lap_target / plan_from_params / simulate /
-#     evaluate / pick / place_marks の引数・戻り値
+#   - load_params / course_from_params / race_span / steady_lap_target / fuel_slack / plan_from_params /
+#     simulate / evaluate / pick / place_marks の引数・戻り値
 #   - JITTER / HOME_MARGIN_S の意味
 INTERFACE_VERSION = 3
 
@@ -794,6 +794,11 @@ def evaluate(p: dict, course: Course, pol: dict, **kw) -> dict:
     return r
 
 
+def fuel_slack(p: dict, given: float | None = None) -> float:
+    """推奨を選ぶときの燃料の許容幅。指定 > パラメータの fuel_slack > 0.05。"""
+    return given if given is not None else float(p.get("fuel_slack", 0.05))
+
+
 def pick(results: list, target_s: float, fuel_slack: float = 0.05):
     """(燃料最小, 推奨)。推奨は燃料最小から fuel_slack 以内で加速回数が最も少ない組。
 
@@ -1008,7 +1013,8 @@ def cmd_optimize(args) -> int:
                 break
             v_off += 0.5
         results.append(r)
-    best, rec = pick(results, target, args.fuel_slack)
+    slack = fuel_slack(p, args.fuel_slack)
+    best, rec = pick(results, target, slack)
     print("目標 %s / 規定 %s / %d 周 %.2f m / 保険の加速開始 %.0f km/h"
           % (mmss(target), mmss(limit), c["laps"], c["total_m"], guard))
     print(_span_text(c, course))
@@ -1021,7 +1027,7 @@ def cmd_optimize(args) -> int:
         return 1
     print("燃料最小: 1 周 %d 回" % len(best["pol"]["marks"]))
     print("推奨    : 1 周 %d 回（燃料最小から %.0f%% 以内で加速回数が最少）"
-          % (len(rec["pol"]["marks"]), args.fuel_slack * 100))
+          % (len(rec["pol"]["marks"]), slack * 100))
     worst = _report(p, course, rec, args, limit)
     return 0 if worst <= limit else 2
 
@@ -1039,7 +1045,7 @@ def cmd_speed_rule(args) -> int:
                 if v_off - v_on >= 6:
                     results.append(evaluate(p, course, {"v_off": float(v_off), "v_on": float(v_on),
                                                         "zone": zone}))
-    best, rec = pick(results, target, args.fuel_slack)
+    best, rec = pick(results, target, fuel_slack(p, args.fuel_slack))
     print("目標 %s / 規定 %s" % (mmss(target), mmss(c["limit_s"])))
     print("（時間は開始速度を ±0.5 km/h ずらした 3 通りの最短〜最長、燃料は平均、加速回数は最大）")
     if rec is None:
@@ -1126,8 +1132,12 @@ _SLOPE_STYLE = (("up", "#d97706", "登り"), ("flat", "#9ca3af", "平坦"), ("do
 _BURN_COLOR = "#dc2626"
 
 
-def course_svg(course: Course, marks, spans, v_off: float, width: int = 900) -> str:
-    """北を上にしたコース図。勾配で色分けし、加速開始位置と加速区間を重ねる。"""
+def course_svg(course: Course, marks, spans, v_off: float, width: int = 900,
+               start_finish: tuple | None = None) -> str:
+    """北を上にしたコース図。勾配で色分けし、加速開始位置と加速区間を重ねる。
+
+    start_finish = (発進位置 m, ゴール位置 m) を渡すと、内側のレーンにある発進・ゴールの位置を描く。
+    """
     pad_x, top, bottom = 200, 80, 130
     lat0, lng0 = min(course.lat), min(course.lng)
     mx = [(g - lng0) * 111320.0 * course._coslat for g in course.lng]
@@ -1148,11 +1158,11 @@ def course_svg(course: Course, marks, spans, v_off: float, width: int = 900) -> 
         d = math.hypot(x1 - x0, y1 - y0)
         return x - (y1 - y0) / d * dist, y + (x1 - x0) / d * dist
 
-    def label(s, dist, text, size=15, weight="normal", fill="#111827"):
+    def label(s, dist, text, size=15, weight="normal", fill="#111827", flip=True):
         x, y = outward(s, dist)
         ox = (x - at(s)[0]) / abs(dist)
         anchor = "start" if ox > 0.35 else "end" if ox < -0.35 else "middle"
-        if dist < 0:
+        if dist < 0 and flip:
             anchor = {"start": "end", "end": "start"}.get(anchor, anchor)
         return ('<text x="%.1f" y="%.1f" text-anchor="%s" dominant-baseline="middle" font-size="%d" '
                 'font-weight="%s" fill="%s" stroke="#ffffff" stroke-width="4" paint-order="stroke">%s</text>'
@@ -1197,10 +1207,20 @@ def course_svg(course: Course, marks, spans, v_off: float, width: int = 900) -> 
         out.append('<polygon points="9,0 -7,-7 -7,7" fill="#111827" transform="translate(%.1f,%.1f) rotate(%.1f)"/>'
                    % (x0, y0, ang))
 
-    # スタート / ゴールライン
+    # コントロールライン（周回の通過）と、内側のレーンにある発進・ゴール
     (ax, ay), (bx, by) = outward(0, -16), outward(0, 16)
     out.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="#111827" stroke-width="4"/>' % (ax, ay, bx, by))
-    out.append(label(0, 30, "スタート / ゴール（0 m）", weight="bold"))
+    if start_finish is None:
+        out.append(label(0, 30, "スタート / ゴール（0 m）", weight="bold"))
+    else:
+        out.append(label(0, 30, "コントロールライン（0 m）", weight="bold"))
+        for pos, text in zip(start_finish, ("発進", "ゴール")):
+            if pos is None:
+                continue
+            (ax, ay), (bx, by) = outward(pos, -12), outward(pos, -40)
+            out.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="#111827" stroke-width="3" '
+                       'stroke-dasharray="5 3"/>' % (ax, ay, bx, by))
+            out.append(label(pos, -46, "%s（%.0f m）" % (text, pos), size=13, flip=False))
 
     # 加速区間と加速開始位置
     for s0, s1, _ in spans:
@@ -1244,8 +1264,10 @@ def cmd_map(args) -> int:
     p = load_params(args.params)
     course = course_from_params(p, args.waypoints)
     spans = burn_spans(p, course, args.marks, args.v_off)
+    s0, total, on_line = race_span(p["course"], course.lap_m)
+    sf = None if on_line and not s0 else (s0, None if on_line else total % course.lap_m)
     with open(args.out, "w", encoding="utf-8") as f:
-        f.write(course_svg(course, args.marks, spans, args.v_off))
+        f.write(course_svg(course, args.marks, spans, args.v_off, start_finish=sf))
     print("コース図: %s" % args.out)
     print("番号 | 位置 m | ID | 緯度, 経度 | 加速区間 m")
     for n, m in enumerate(sorted(args.marks), 1):
@@ -1291,8 +1313,9 @@ def main(argv=None) -> int:
     s.add_argument("--target", help="目標時間 MM:SS（既定は JSON の target_s）")
     s.add_argument("--n-min", type=int, default=2, help="1 周あたり加速回数の下限")
     s.add_argument("--n-max", type=int, default=5, help="1 周あたり加速回数の上限")
-    s.add_argument("--fuel-slack", type=float, default=0.05,
-                   help="推奨を選ぶとき、燃料最小からこの割合までは加速回数の少なさを優先する")
+    s.add_argument("--fuel-slack", type=float,
+                   help="推奨を選ぶとき、燃料最小からこの割合までは加速回数の少なさを優先する"
+                        "（既定は JSON の fuel_slack、無ければ 0.05）")
     s.add_argument("--fails", type=int, default=3, help="感度に入れる再始動失敗の回数")
     s.add_argument("--trace", help="推奨パターンの速度トレース CSV の出力先")
     s.set_defaults(func=cmd_optimize)
@@ -1308,7 +1331,7 @@ def main(argv=None) -> int:
     s.add_argument("--on-max", type=int, default=24)
     s.add_argument("--off-min", type=int, default=28)
     s.add_argument("--off-max", type=int, default=38)
-    s.add_argument("--fuel-slack", type=float, default=0.05)
+    s.add_argument("--fuel-slack", type=float, help="既定は JSON の fuel_slack、無ければ 0.05")
     s.add_argument("--top", type=int, default=10)
     s.set_defaults(func=cmd_speed_rule)
 

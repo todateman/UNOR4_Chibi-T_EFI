@@ -399,17 +399,19 @@ class TestSimulate(unittest.TestCase):
         # 合計ではなく最終周に入る通過で比べる（間に合っていれば最終周は惰行で終えるため）
         self.assertLess(closed["crossings"][-2][0], open_loop["crossings"][-2][0] - 15)
 
-    def test_start_and_finish_off_the_control_line(self):
+    def test_start_and_finish_in_the_inner_lanes(self):
         c = self.p["course"]
         lap = self.course.lap_m
-        self.assertEqual(ss.race_span(c, lap), (160.0, 6 * lap + 2224.0, False))
+        self.assertEqual(ss.race_span(c, lap), (160.0, 6 * lap + 2224.0, True))
         trace = []
         r = ss.simulate(self.p, self.course, 32.5, marks=[100.0, 800.0, 1400.0], v_on=16.0,
                         trace=trace, trace_every=1)
-        # コントロールラインは 6 回通過し、最後の要素がゴール
+        # コントロールライン（2224 m）は 6 回通過し、7 回目がゴール
         self.assertEqual(len(r["crossings"]), c["laps"])
-        self.assertEqual(r["crossings"][-1][0], r["time_s"])
+        self.assertAlmostEqual(r["crossings"][-1][0], r["time_s"], delta=0.11)
         self.assertLess(r["crossings"][-2][0], r["time_s"] - 200)
+        first = next(tr for tr in trace if tr[0] >= r["crossings"][0][0])
+        self.assertAlmostEqual(first[1], 2224.0, delta=2.0)
         self.assertEqual(r["starts"][0], (1, 160.0, 0.0))
         self.assertAlmostEqual(trace[-1][1], 6 * lap + 2224.0, delta=2.0)
         # 発進位置より手前の目印（100 m）は 1 周目には来ず、2 周目から使う
@@ -418,13 +420,28 @@ class TestSimulate(unittest.TestCase):
         self.assertIn((2, 100), [(n, round(pos, -1)) for n, pos in firsts])
 
     def test_without_start_and_finish_runs_whole_laps(self):
-        c = {k: v for k, v in self.p["course"].items() if k not in ("start_m", "finish_m")}
+        c = {k: v for k, v in self.p["course"].items() if k not in ("start_m", "finish_m", "control_m")}
         p = dict(self.p, course=c)
         lap = self.course.lap_m
         self.assertEqual(ss.race_span(c, lap), (0.0, 7 * lap, True))
         r = ss.simulate(p, self.course, 32.5, marks=self.marks, v_on=16.0)
         self.assertEqual(len(r["crossings"]), 7)
         self.assertGreater(r["time_s"], self.base["time_s"] + 20)    # 約 270 m 長い
+
+    def test_control_line_off_id1(self):
+        # ゴールがコントロールライン上でないとき（ID 1 で数える）は、ゴールを最後に足す
+        c = dict(self.p["course"], control_m=0)
+        p = dict(self.p, course=c)
+        lap = self.course.lap_m
+        self.assertEqual(ss.race_span(c, lap), (160.0, 6 * lap + 2224.0, False))
+        r = ss.simulate(p, self.course, 32.5, marks=self.marks, v_on=16.0)
+        self.assertEqual(len(r["crossings"]), 7)
+        self.assertEqual(r["crossings"][-1][0], r["time_s"])
+        # 同じ走りでも、ID 1 で数えると各周の通過は約 117 m ぶん遅い
+        base = [t for t, _, _ in self.base["crossings"]]
+        late = [t for t, _, _ in r["crossings"]]
+        for a, b in zip(base[:6], late[:6]):
+            self.assertGreater(b - a, 8)
 
     def test_plan_from_params(self):
         self.assertIsNone(ss.plan_from_params(self.p))

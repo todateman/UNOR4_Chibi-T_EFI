@@ -15,6 +15,11 @@
 #define HEALTH_CARRY_MAGIC  0x59524143UL  // "CARY"
 #define HEALTH_TASK_NAME    12
 
+// DiagRec.pending の値
+#define PENDING_NONE    0
+#define PENDING_FAULT   1   // 自前のソフトリセット直前
+#define PENDING_UPLOAD  2   // 書き込み要求（1200bpsタッチ）を受けた
+
 #define PRCR_KEY        0xA500U
 #define PRCR_PRC1       0x0002U   // VBTBKR の書き込み許可
 
@@ -32,7 +37,7 @@ struct DiagRec {
   uint32_t magic;
   uint16_t count;        // 自動リセット（WDT・ソフトリセット）の累計
   uint8_t  fault;        // HealthFault
-  uint8_t  pending;      // 自前のソフトリセット直前に1（RSTSRがブートローダに消された場合の保険）
+  uint8_t  pending;      // PENDING_*（次の起動でリセットの種類を見分けるための印）
   uint32_t pc;           // 異常時のPC（積まれたスタックフレームから）
   uint32_t lr;
   uint32_t cfsr;
@@ -144,12 +149,15 @@ void healthBootInit() {
   DiagRec d;
   diagLoadOrInit(d);
 
-  if      (r0 & 0x01U)      lastReset = HEALTH_RST_POR;    // PORF
+  // 書き込みはWDTリセットでブートローダに入り、ソフトリセットでアプリに戻る。
+  // ブートローダはRSTSRを消さないので、印を見ないとハングからの自動リセットと区別できない。
+  if      (d.pending == PENDING_UPLOAD) lastReset = HEALTH_RST_UPLOAD;
+  else if (r0 & 0x01U)      lastReset = HEALTH_RST_POR;    // PORF
   else if (r0 & 0x0EU)      lastReset = HEALTH_RST_LVD;    // LVD0RF〜LVD2RF
   else if (r1 & 0x0002U)    lastReset = HEALTH_RST_WDT;    // WDTRF
   else if (r1 & 0x0001U)    lastReset = HEALTH_RST_IWDT;   // IWDTRF
   else if (r1 & 0x0004U)    lastReset = HEALTH_RST_SW;     // SWRF
-  else if (d.pending)       lastReset = HEALTH_RST_SW;     // フラグが消されていても自前のリセットは分かる
+  else if (d.pending == PENDING_FAULT) lastReset = HEALTH_RST_SW;  // フラグが消されていても自前のリセットは分かる
   else if (!(r2 & 0x01U))   lastReset = HEALTH_RST_POR;    // CWSF=0: コールドスタート
   else                      lastReset = HEALTH_RST_PIN;
 
@@ -166,7 +174,7 @@ void healthBootInit() {
     d.magic = HEALTH_DIAG_MAGIC;
   }
   if (autoReset && d.count < 0xFFFFU) d.count++;
-  d.pending      = 0;
+  d.pending      = PENDING_NONE;
   d.lastReset    = (uint8_t)lastReset;
   d.rstsr0       = r0;
   d.rstsr1       = r1;
@@ -174,7 +182,7 @@ void healthBootInit() {
   d.flagsCleared = (R_SYSTEM->RSTSR0 == 0 && R_SYSTEM->RSTSR1 == 0) ? 1 : 0;
   diagStore(d);
 
-  // 手動リセット・電源投入では従来どおり積算値を0から始める
+  // 手動リセット・電源投入・書き込みでは従来どおり積算値を0から始める
   if (!autoReset) carryInvalidate();
 }
 
@@ -229,7 +237,17 @@ void healthWatchdogStart() {
 void healthKick(uint32_t routineBeat) {
   static uint32_t lastBeat = 0;
   // アップロード要求（1200bpsタッチ）後は更新をやめ、ブートローダへのリセットを妨げない
-  if (&is_watchdog_reset_in_progress_for_upload != NULL && is_watchdog_reset_in_progress_for_upload) return;
+  if (&is_watchdog_reset_in_progress_for_upload != NULL && is_watchdog_reset_in_progress_for_upload) {
+    static bool marked = false;
+    if (!marked) {
+      DiagRec d;
+      diagLoadOrInit(d);
+      d.pending = PENDING_UPLOAD;
+      diagStore(d);
+      marked = true;
+    }
+    return;
+  }
   if (routineBeat == lastBeat) return;   // Routine（AGT割込み）が止まっている
   lastBeat = routineBeat;
   WDT.refresh();
@@ -259,7 +277,7 @@ static void recordAndReset(HealthFault kind, const uint32_t *frame, const char *
     d.exc = (uint16_t)(__get_IPSR() & 0x1FFU);
   }
   copyTaskName(d.task, taskName);
-  d.pending = 1;
+  d.pending = PENDING_FAULT;
   diagStore(d);
   NVIC_SystemReset();
 }
@@ -310,6 +328,7 @@ const char* healthResetText(HealthReset r) {
     case HEALTH_RST_WDT:  return "WDT";
     case HEALTH_RST_IWDT: return "IWDT";
     case HEALTH_RST_SW:   return "SW";
+    case HEALTH_RST_UPLOAD: return "UPLOAD";
     default:              return "?";
   }
 }

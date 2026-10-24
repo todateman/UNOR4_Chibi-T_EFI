@@ -320,7 +320,7 @@ python tools/send_map.py microSD/RPM_2024MOTEGI.CSV --legacy-inj-end-ca 680
 | `TELEM?` | `on=` / `ms=` / `drop=`（取りこぼし数）を表示 | 可 |
 | `VER` | `OK VER <fw> proto=<n>`<BR>（現行 `1.4.0` / `proto=5`。v3 で MAP を 4 列化、<BR>v4 でテレメトリに `inj_end` を追加、<BR>v5 で `inj_end` を `ign` の直後へ移動） | 可 |
 | `PING` | `OK PONG`<BR>（副作用のない疎通確認・レイテンシ計測） | 可 |
-| `DIAG` | 直前のリセット原因（`rst=POR/PIN/WDT/SW/LVD`）、自動リセットの累計（`count=`）、<BR>記録した異常（`fault=HARD/STACK`、`pc=` / `lr=` / `cfsr=` / `hfsr=` / `exc=` / `task=`）、<BR>積算値を引き継いだか（`carry=`）を表示 | 可 |
+| `DIAG` | 直前のリセット原因（`rst=POR/PIN/WDT/SW/LVD/UPLOAD`）、自動リセットの累計（`count=`）、<BR>記録した異常（`fault=HARD/STACK`、`pc=` / `lr=` / `cfsr=` / `hfsr=` / `exc=` / `task=`）、<BR>積算値を引き継いだか（`carry=`）を表示 | 可 |
 | `DIAG CLEAR` | 記録と自動リセットの累計を消す | 可 |
 | `DIAG HANG` / `DIAG FAULT` | 自動復旧の確認用に、わざとハング／HardFault を起こす | **不可** |
 | `HELP` | コマンド一覧 | 可 |
@@ -331,7 +331,7 @@ python tools/send_map.py microSD/RPM_2024MOTEGI.CSV --legacy-inj-end-ca 680
 HardFault とスタックあふれ（`configCHECK_FOR_STACK_OVERFLOW=2`）は、PC・例外番号（`exc=0` はタスク、`16+n` は IRQn）・タスク名を VBATT バックアップレジスタに記録してからリセットする。  
 落ちた箇所は `arm-none-eabi-addr2line -e .pio/build/uno_r4_minima/firmware.elf <pc>` で引ける。
 
-自動リセット（`WDT` / `SW`）のときだけ、走行時間・距離・燃料を引き継ぐ。ロガーの周回数を 0 に戻さないためで、リセットボタン（`PIN`）と電源投入（`POR`）では従来どおり 0 から始める。
+自動リセット（`WDT` / `SW`）のときだけ、走行時間・距離・燃料を引き継ぐ。ロガーの周回数を 0 に戻さないためで、リセットボタン（`PIN`）・電源投入（`POR`）・書き込み（`UPLOAD`）では従来どおり 0 から始める。
 
 セッションを開いたままホストが消えた場合に備え、**最終受信から 5 秒で** `ERR SESSION_TIMEOUT` を返してセッションを破棄する。  
 （テレメトリがミュートされたまま復帰しなくなるのを防ぐ）

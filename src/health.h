@@ -22,6 +22,7 @@ enum HealthReset : uint8_t {
   HEALTH_RST_WDT,       // ウォッチドッグ（ハングからの自動復旧）
   HEALTH_RST_IWDT,      // 独立ウォッチドッグ
   HEALTH_RST_SW,        // ソフトウェアリセット（HardFault・スタックあふれの記録後）
+  HEALTH_RST_UPLOAD,    // USBからの書き込み（ブートローダ経由。WDT・SWのフラグが立つが自動リセットではない）
 };
 
 // 最後に記録した異常の種類

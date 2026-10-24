@@ -3,6 +3,7 @@
 //-----------------------------------------------------------------------------
 #include "map_console.h"
 #include "map_store.h"
+#include "health.h"
 
 #define MAP_CONSOLE_LINE_MAX   96    // 1行の最大長（CSV1行は十分に収まる）
 #define MAP_CONSOLE_PERIOD_MS  5     // ポーリング周期
@@ -16,7 +17,7 @@
 #define TELEM_DIV_MAX          20
 #define TELEM_BASE_MS          100   // = main.cpp の STATUS_TASK_DELAY_MS
 
-#define FW_VERSION             "1.3.0"
+#define FW_VERSION             "1.4.0"
 // v3: MAP列を4列化（rpm,inj,ign,inj_end_ca）
 // v4: テレメトリT行の末尾に inj_end を追加（先頭10個だけ読む旧パーサとは互換）
 // v5: テレメトリT行の inj_end を ign の直後へ移動（列数は同じ11なので旧パーサとは非互換）
@@ -179,7 +180,48 @@ static void cmdHelp() {
   Serial.println(F("TELEM?                telemetry state"));
   Serial.println(F("VER                   firmware / protocol version"));
   Serial.println(F("PING                  connectivity check"));
+  Serial.println(F("DIAG                  last reset cause / recorded fault (pc, exc, task)"));
+  Serial.println(F("DIAG CLEAR            clear the recorded fault and auto reset count"));
+  Serial.println(F("DIAG HANG | FAULT     test watchdog / fault recovery (stopped only)"));
   replyOk("HELP");
+}
+
+//-----------------------------------------------------------------------------
+// DIAG: リセット原因と、記録した異常（HardFault・スタックあふれ）の表示
+//
+// HANG / FAULT は自動復旧の確認用。エンジン稼働中は拒否する。
+//-----------------------------------------------------------------------------
+static void cmdDiag(const char* args) {
+  const char* sub = skipSpace(args);
+  const char* a;
+  if (*sub == '\0') {
+    healthPrintDiag();
+    return;
+  }
+  if ((a = matchToken(sub, "CLEAR")) != NULL && *skipSpace(a) == '\0') {
+    healthClearDiag();
+    replyOk("DIAG CLEARED");
+    return;
+  }
+  const bool hang  = (a = matchToken(sub, "HANG"))  != NULL && *skipSpace(a) == '\0';
+  const bool fault = !hang && (a = matchToken(sub, "FAULT")) != NULL && *skipSpace(a) == '\0';
+  if (!hang && !fault) {
+    replyErr("UNKNOWN_DIAG_SUBCOMMAND");
+    return;
+  }
+  if (ENG_ON || tachoRpm != 0) {
+    replyErr("ENGINE_RUNNING");
+    return;
+  }
+  replyOk(hang ? "HANG" : "FAULT");
+  Serial.flush();
+  vTaskDelay(pdMS_TO_TICKS(50));   // 応答をホストへ送り切る
+  if (hang) {
+    // 割込みごと止める。ウォッチドッグのリセットで復帰するはず。
+    __disable_irq();
+    for (;;) {}
+  }
+  __asm volatile("udf #0");        // 未定義命令 → UsageFault → HardFault
 }
 
 //-----------------------------------------------------------------------------
@@ -395,6 +437,12 @@ static void processLine(const char* line) {
   const char* v = matchToken(p, "VER");
   if (v != NULL && *skipSpace(v) == '\0') {
     cmdVer();
+    return;
+  }
+
+  const char* dg = matchToken(p, "DIAG");
+  if (dg != NULL && (*dg == '\0' || *dg == ' ' || *dg == '\t')) {
+    cmdDiag(dg);
     return;
   }
 

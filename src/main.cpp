@@ -6,6 +6,7 @@
 #include <Arduino_FreeRTOS.h>
 #include "map_store.h"
 #include "map_console.h"
+#include "health.h"
 
 // IRAM_ATTR が未定義の場合は空定義を追加（ESP32等でなければ不要）
 #ifndef IRAM_ATTR
@@ -17,7 +18,6 @@
 //-----------------------------------------------------------------------------
 void IRAM_ATTR WH_PULSE_ISR();
 void IRAM_ATTR ReadNe_ISR();
-void IRAM_ATTR G_PULSE_ISR();
 
 //-----------------------------------------------------------------------------
 // 定数・設定
@@ -143,6 +143,7 @@ unsigned long starttime    = 0;           // エンジン始動時間（ms）
 volatile uint32_t worktime = 0;           // エンジン稼働時間（0.1秒単位）
 
 volatile float usecperdig = 1.0;          // NE_A_INの1パルスあたりの時間（us）
+volatile uint32_t routineBeat = 0;        // Routine()の実行回数（ウォッチドッグがRoutineの停止を見分けるため）
 
 //-----------------------------------------------------------------------------
 // MAPテーブル
@@ -219,12 +220,15 @@ void IRAM_ATTR ReadNe_ISR() {
       // ドゥエル時間を回転数に応じたクランク角度に変換
       // クランキング中だけ延長する。通電開始角と通電時間の上限が食い違わないよう、同じ値を使う。
       Dwell_Time_Act_US = (starterState == STR_CRANKING) ? Dwell_Time_CRANK_US : Dwell_Time_US;
-      Dwell_Time_CA = (int16_t)(Dwell_Time_Act_US * 360.0 / tachoWidth);
+      // 整数演算にする（ISRでのdouble除算はソフト演算で数µsかかる。切り捨てなので結果は同じ）
+      Dwell_Time_CA = (int16_t)((uint32_t)Dwell_Time_Act_US * 360UL / tachoWidth);
     }
     // カムパルスはタイミングチェーンのテンションで揺れるため、360〜720CA（爆発・排気行程）に
     // 入る前提で Ne_deg > 360 の Z でだけ頭出しする。ただし電源投入・リセット直後は Ne_deg が
     // 実角度と対応しておらず、停止位置によってはこの条件で 360CA ずれたまま固定されるため、
     // 最初の1回だけはカムパルス後の最初の Z で頭出しする（Issue #12）。
+    // 走行中の再始動でも同じずれが残りうるため、スタートスイッチを押すたびに CycleSynced を
+    // 戻して頭出しをやり直す（Routine() のスタートスイッチ処理）。
     if (G_Pulse_Flag && (Ne_deg > 360 || !CycleSynced)) {
       Ne_deg = 0;
       G_Pulse_Flag = false;
@@ -232,15 +236,6 @@ void IRAM_ATTR ReadNe_ISR() {
       CycleSynced = true;
     }
   }
-}
-
-// G_PULSE_ISR：カム角センサ割込み（G_IN）
-void IRAM_ATTR G_PULSE_ISR() {
-  if (!G_Pulse) {
-    G_Pulse = true;
-    G_Pulse_Flag = true;
-  }
-  // リリース状態は Routine 内で処理
 }
 
 //-----------------------------------------------------------------------------
@@ -335,6 +330,8 @@ void cycleReset() {
 // Routine(): AGTimerより周期実行されるリアルタイム処理
 //-----------------------------------------------------------------------------
 void Routine() {
+  routineBeat++;
+
   // スタートスイッチの状態を更新(OFF=HIGH, ON=LOW)
   startState = fastestdigitalRead(STR_IN);
 
@@ -354,7 +351,9 @@ void Routine() {
       Ne_deg += (int16_t)(ROUTINE_CYCLE_US / usecperdig);
   }
   
-  // カム角センサのパルス処理
+  // カム角センサのパルス処理。割込み（CHANGE）は使わずここでポーリングする。
+  // 24µs周期は6000rpmで約0.9CAで、カムパルスはZの約30CA前に終わるためZまでに必ず拾える。
+  // 割込みにすると停止位置でセンサがチャタリングしたとき、優先度14のRoutineと全タスクが止まる。
   if (fastestdigitalRead(G_IN) == LOW) {
     if (!G_Pulse) {
       G_Pulse = true;
@@ -396,6 +395,10 @@ void Routine() {
         }
       }
       cycleReset();   // キルスイッチ状態に関わらず従来どおり実行
+      // 頭出しをカム基準でやり直す。Ne_deg > 360 の条件だけでは 360CA ずれた位相も
+      // 安定してしまい、一度ずれると始動できないまま続く（2026全国大会の練習走行 LOG0662）。
+      // カムパルスは 510〜690CA（Z の約30°手前で終わる）なので、カム後の最初の Z は必ずサイクルの頭。
+      CycleSynced = false;
     }
   }
   lastStartState = startState;
@@ -406,7 +409,7 @@ void Routine() {
       timeNow_INJ_OFF = micros();
       fastestdigitalWrite(INJ_OUT, HIGH);
       INJ_Status = 1;
-      gasml += (((timeNow_INJ_OFF - timeNow_INJ_ON) * 0.0000007) + 0.0015) / 1.5073;
+      gasml += (((timeNow_INJ_OFF - timeNow_INJ_ON) * 0.0000007f) + 0.0015f) / 1.5073f;  // 単精度（FPU）で計算
     }
     inj360Reset = true;
   }
@@ -433,7 +436,7 @@ void Routine() {
       timeNow_INJ_OFF = micros();
       fastestdigitalWrite(INJ_OUT, HIGH);
       INJ_Status = 1;   // 次の噴射に備えてON状態へ
-      gasml += (((timeNow_INJ_OFF - timeNow_INJ_ON) * 0.0000007) + 0.0015) / 1.5073;
+      gasml += (((timeNow_INJ_OFF - timeNow_INJ_ON) * 0.0000007f) + 0.0015f) / 1.5073f;  // 単精度（FPU）で計算
     }
   }
   
@@ -562,6 +565,19 @@ void statusTask(void *pvParameters) {
 
     INJ_timems = calculatedINJ_time * 0.1f;
     worktime = Launch ? (millis() - starttime) / 100 : 0;
+
+    // Routineとこのタスクの両方が動いているときだけWDTを更新する。
+    // どちらかが止まれば約1.4秒でリセットし、スタータ操作を受け付ける状態に戻る。
+    healthKick(routineBeat);
+    // 自動リセット後に走行時間・距離・燃料を続きから数えるための保存（ロガーの周回数を0に戻さない）
+    {
+      HealthCarry c;
+      c.launch     = Launch;
+      c.elapsedMs  = Launch ? millis() - starttime : 0;
+      c.distancemm = distancemm;
+      c.gasml      = gasml;
+      healthSaveCarry(c);
+    }
 
     if (Serial1Enabled) {
       // newlib-nano の snprintf は %.1f 非対応のため整数演算で小数1桁を表現
@@ -706,6 +722,8 @@ void statusTask(void *pvParameters) {
 // setup()
 //-----------------------------------------------------------------------------
 void setup() {
+  // リセット原因はほかの初期化より先に読む（フラグをクリアするため）
+  healthBootInit();
   Serial.begin(115200);
   Serial1.begin(115200);
 
@@ -717,6 +735,23 @@ void setup() {
   Serial.print(F(" ("));
   Serial.print(mapGetActive().count);
   Serial.println(F(" rows)"));
+
+  // ハングからの自動リセットなら、走行中だった積算値を引き継ぐ。
+  // リセットボタン・電源投入では引き継がない（従来どおり0から）。
+  HealthCarry carry;
+  if (healthRestoreCarry(carry)) {
+    Launch = true;
+    starttime = millis() - carry.elapsedMs;
+    if (starttime == 0) starttime = 1;   // 0は「未始動」の印（スタートスイッチ処理）
+    distancemm = carry.distancemm;
+    distance = distancemm / 1000;
+    gasml = carry.gasml;
+  }
+  Serial.print(F("RESET: "));
+  Serial.print(healthResetText(healthLastReset()));
+  Serial.print(F(" auto_count="));
+  Serial.print(healthAutoResetCount());
+  Serial.println(Launch ? F(" (carry over)") : F(""));
 
   pinMode(WH_IN, INPUT_PULLUP);
   pinMode(G_IN, INPUT_PULLUP);
@@ -767,14 +802,16 @@ void setup() {
     attachInterrupt(digitalPinToInterrupt(NE_A_IN), ReadNe_ISR, RISING);
   }
   attachInterrupt(digitalPinToInterrupt(WH_IN), WH_PULSE_ISR, FALLING);
-  attachInterrupt(digitalPinToInterrupt(G_IN), G_PULSE_ISR, CHANGE);
   
   AGTimer.init(ROUTINE_CYCLE_US, Routine);
   AGTimer.start();
-  
-  xTaskCreate(statusTask, "StatusTask", 256, NULL, 2, NULL);
+  healthWatchdogStart();
+
+  // スタックは 256 words だとFault時の拡張例外フレーム（FPU込み104バイト）を含めた余裕が薄いため増やす。
+  // configCHECK_FOR_STACK_OVERFLOW=2（platformio.ini）であふれを検出して記録・リセットする。
+  xTaskCreate(statusTask, "StatusTask", 384, NULL, 2, NULL);
   // MAP書き換えコンソール（statusTaskより低優先度）
-  xTaskCreate(mapConsoleTask, "MapConsole", 256, NULL, 1, NULL);
+  xTaskCreate(mapConsoleTask, "MapConsole", 384, NULL, 1, NULL);
 
   vTaskStartScheduler();
 }

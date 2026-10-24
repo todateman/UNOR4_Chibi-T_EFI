@@ -225,6 +225,8 @@ void IRAM_ATTR ReadNe_ISR() {
     // 入る前提で Ne_deg > 360 の Z でだけ頭出しする。ただし電源投入・リセット直後は Ne_deg が
     // 実角度と対応しておらず、停止位置によってはこの条件で 360CA ずれたまま固定されるため、
     // 最初の1回だけはカムパルス後の最初の Z で頭出しする（Issue #12）。
+    // 走行中の再始動でも同じずれが残りうるため、スタートスイッチを押すたびに CycleSynced を
+    // 戻して頭出しをやり直す（Routine() のスタートスイッチ処理）。
     if (G_Pulse_Flag && (Ne_deg > 360 || !CycleSynced)) {
       Ne_deg = 0;
       G_Pulse_Flag = false;
@@ -396,6 +398,10 @@ void Routine() {
         }
       }
       cycleReset();   // キルスイッチ状態に関わらず従来どおり実行
+      // 頭出しをカム基準でやり直す。Ne_deg > 360 の条件だけでは 360CA ずれた位相も
+      // 安定してしまい、一度ずれると始動できないまま続く（2026全国大会の練習走行 LOG0662）。
+      // カムパルスは 510〜690CA（Z の約30°手前で終わる）なので、カム後の最初の Z は必ずサイクルの頭。
+      CycleSynced = false;
     }
   }
   lastStartState = startState;

@@ -30,10 +30,9 @@ optimize は 0 / 0.5 / 1 の感度を必ず併記する。燃料は ECU 積算�
 
 from_lap 周目からその停止速度・加速開始位置で走る。plan サブコマンドは探索をせず、このプランを評価する。
 
-コース距離はウェイポイント ID 1 を 0 とし、ID 1 の通過を周回の通過とする（ロガーのコントロールラインは
-その約 7 m 手前で、通過は約 1 秒早い）。course に
-start_m（発進位置）と finish_m（ゴールラインの位置）を書くと、そこから発進し、コントロールラインを
-laps - 1 回通過したあと finish_m でゴールする（race_span）。
+コース距離はウェイポイント ID 1 を 0 とする。周回の通過は course の control_m（コントロールラインの
+位置、既定は 0 = ID 1）で数える。course に start_m（発進位置）と finish_m（ゴールラインの位置）を書くと、
+そこから発進し、コントロールラインを laps - 1 回通過したあと finish_m でゴールする（race_span）。
 
 ロガー（Chibi-T_Furoshiki_Logger）の tools/make_strategy_json.py が、このファイルとパラメータ JSON を
 読み込んで走行支援の設定ファイルを作る。形式が変わったことを向こうで検知できるよう、版数を 2 つ持つ:
@@ -62,10 +61,10 @@ G = 9.80665
 
 # ロガー側の tools/make_strategy_json.py が照合する版数。次のどれかを変えたら上げる:
 #   - 推奨パターンの選び方（cmd_optimize。ロガー側は同じ手順を写して持っている）
-#   - load_params / course_from_params / race_span / steady_lap_target / fuel_slack / plan_from_params /
+#   - load_params / course_from_params / race_span / control_m / steady_lap_target / fuel_slack / plan_from_params /
 #     simulate / evaluate / pick / place_marks の引数・戻り値
 #   - JITTER / HOME_MARGIN_S の意味
-INTERFACE_VERSION = 3
+INTERFACE_VERSION = 4
 
 
 # ---------------------------------------------------------------------------
@@ -185,21 +184,26 @@ def course_from_params(p: dict, waypoints: str | None = None) -> Course:
     return Course(path, c["total_m"] / c["laps"])
 
 
+def control_m(c: dict) -> float:
+    """コントロールライン（周回を数える位置）の、ウェイポイント ID 1 からの距離 m。既定は 0。"""
+    return float(c.get("control_m", 0.0))
+
+
 def race_span(c: dict, lap: float, laps: int | None = None):
     """(発進位置 m, ゴールまでの通算距離 m, ゴールがコントロールライン上か)。
 
-    コース距離はウェイポイント ID 1 を 0 とし、ここの通過を周回の通過とする（ロガーのコントロールラインは
-    約 7 m 手前）。
-    course の start_m（発進位置）と finish_m（ゴールラインの位置）が無ければ、コントロールラインから
-    発進して規定周回ちょうどでゴールする。finish_m があるときは、コントロールラインを laps - 1 回
-    通過したあと finish_m でゴールする（もてぎは発進もゴールも周回路の内側の別レーン）。
+    コース距離はウェイポイント ID 1 を 0 とする。
+    course の start_m（発進位置）と finish_m（ゴールラインの位置）が無ければ、ID 1 から発進して規定周回
+    ちょうどでゴールする。finish_m があるときは、コントロールラインを laps - 1 回通過したあと finish_m で
+    ゴールする（もてぎは発進もゴールも周回路の内側の別レーンで、ゴールラインはコントロールラインと同じ並び）。
+    control_m は finish_m と組で使う（発進位置はコントロールラインより手前に置く）。
     """
     n = laps if laps is not None else c["laps"]
     s0 = float(c.get("start_m", 0.0))
     fin = c.get("finish_m")
     if fin is None:
-        return s0, n * lap, True
-    return s0, (n - 1) * lap + float(fin), False
+        return s0, n * lap, control_m(c) % lap == 0
+    return s0, (n - 1) * lap + float(fin), abs(float(fin) - control_m(c)) < 0.5
 
 
 def coast_step(course: Course, s: float, v: float, crr: float, k: float, dt_s: float):
@@ -635,8 +639,9 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
 
     最終盤は、惰行だけでゴールに届き、かつ規定時間まで HOME_MARGIN_S 以上残ると分かった
     時点で以降加速しない。
-    発進位置とゴール位置は race_span() で決まる。戻り値の crossings はコントロールラインの通過
-    ごとの (累積時間, 燃料, 加速回数) で、最後の要素はゴール（コントロールライン上でなくても足す）。
+    発進位置とゴール位置は race_span() で、コントロールラインの位置は control_m() で決まる。戻り値の
+    crossings はコントロールラインの通過ごとの (累積時間, 燃料, 加速回数) で、最後の要素はゴール
+    （コントロールライン上でなくても足す）。starts の周はコントロールラインで数えた周（1 始まり）。
     pace に各周通過の目標累積時間を渡すと、通過のたびに pace_bump() で停止速度を補正する。
     switches に [(周, 停止速度 km/h, marks), ...] を渡すと、その周に入るときに停止速度と
     加速開始位置を替える（周は 1 始まり）。
@@ -652,6 +657,7 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
     xs, acc, frate = burn["speed_kmh"], burn["accel_drum"], burn["fuel_ml_s"]
     lap = course.lap_m
     s0, total, goal_on_line = race_span(c, lap, laps)
+    ctrl = control_m(c)
     vfin = c.get("finish_min_kmh", 12.0) / 3.6
     # 失敗させる再始動（発進を除く通し番号）。序盤・中盤・終盤に散らす
     fail_at = {2 + 7 * i for i in range(fail_restarts)}
@@ -708,18 +714,22 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
                         fuel += rst["fuel_ml"]
                         dead = rst["delay_s"] + (rst["fail_dead_s"] if restarts in fail_at else 0.0)
                         state = "crank"
-                        starts.append((int(s // lap) + 1, s % lap, kmh))
+                        starts.append((len(crossings) + 1, s % lap, kmh))
         if launched:
             vmin = min(vmin, kmh)
         v = max(v + a * dt_s, 0.3)
         s2 = s + v * dt_s
-        if int(s2 // lap) > int(s // lap):
+        if (s2 - ctrl) // lap > (s - ctrl) // lap:
             crossings.append((t + dt_s, fuel, burns))
             if pace is not None and len(crossings) <= len(pace):
                 bump = pace_bump(t + dt_s - pace[len(crossings) - 1])
             while switches and switches[0][0] <= len(crossings) + 1:
                 _, v_off, new_marks = switches.pop(0)
-                marks, mi, mlap = sorted(m % lap for m in new_marks), 0, len(crossings)
+                # 通過した位置より先の目印から使う（ID 1 の通過なら次の周の先頭から）
+                marks, mlap = sorted(m % lap for m in new_marks), int(s2 // lap)
+                mi = bisect.bisect_left(marks, s - mlap * lap)
+                if mi == len(marks):
+                    mi, mlap = 0, mlap + 1
         s = s2
         t += dt_s
         step += 1
@@ -899,10 +909,10 @@ def _pol_text(pol: dict) -> str:
 
 def _span_text(c: dict, course: Course) -> str:
     s0, total, on_line = race_span(c, course.lap_m)
-    if on_line and not s0:
+    if on_line and not s0 and not control_m(c):
         return "発進・ゴールともコントロールライン上"
-    return ("発進 %.0f m・ゴール %.0f m（ID 1 からの距離）、走行距離 %.0f m（公式距離との差 %+.0f m）"
-            % (s0, total % course.lap_m if not on_line else course.lap_m, total - s0, total - s0 - c["total_m"]))
+    return ("発進 %.0f m・ゴール %.0f m・コントロールライン %.0f m（ID 1 からの距離）、走行距離 %.0f m（公式距離との差 %+.0f m）"
+            % (s0, total % course.lap_m or course.lap_m, control_m(c), total - s0, total - s0 - c["total_m"]))
 
 
 def _line(r: dict, total_m: float) -> str:
@@ -1135,10 +1145,11 @@ _BURN_COLOR = "#dc2626"
 
 
 def course_svg(course: Course, marks, spans, v_off: float, width: int = 900,
-               start_finish: tuple | None = None) -> str:
+               start_finish: tuple | None = None, control: float = 0.0) -> str:
     """北を上にしたコース図。勾配で色分けし、加速開始位置と加速区間を重ねる。
 
     start_finish = (発進位置 m, ゴール位置 m) を渡すと、内側のレーンにある発進・ゴールの位置を描く。
+    control にコントロールラインの位置 m を渡すと、ID 1（0 m）とは別に描く。
     """
     pad_x, top, bottom = 200, 80, 130
     lat0, lng0 = min(course.lat), min(course.lng)
@@ -1209,7 +1220,7 @@ def course_svg(course: Course, marks, spans, v_off: float, width: int = 900,
         out.append('<polygon points="9,0 -7,-7 -7,7" fill="#111827" transform="translate(%.1f,%.1f) rotate(%.1f)"/>'
                    % (x0, y0, ang))
 
-    # コントロールライン（周回の通過）と、内側のレーンにある発進・ゴール
+    # 距離の基準（ID 1）と、内側のレーンにある発進・ゴール
     (ax, ay), (bx, by) = outward(0, -16), outward(0, 16)
     out.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="#111827" stroke-width="4"/>' % (ax, ay, bx, by))
     if start_finish is None:
@@ -1223,6 +1234,11 @@ def course_svg(course: Course, marks, spans, v_off: float, width: int = 900,
             out.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="#111827" stroke-width="3" '
                        'stroke-dasharray="5 3"/>' % (ax, ay, bx, by))
             out.append(label(pos, -46, "%s（%.0f m）" % (text, pos), size=13, flip=False))
+    # コントロールライン（周回の通過）
+    if control:
+        (ax, ay), (bx, by) = outward(control, -40), outward(control, 16)
+        out.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="#111827" stroke-width="4"/>' % (ax, ay, bx, by))
+        out.append(label(control, 30, "コントロールライン（%.0f m）" % control, weight="bold"))
 
     # 加速区間と加速開始位置
     for s0, s1, _ in spans:
@@ -1267,9 +1283,11 @@ def cmd_map(args) -> int:
     course = course_from_params(p, args.waypoints)
     spans = burn_spans(p, course, args.marks, args.v_off)
     s0, total, on_line = race_span(p["course"], course.lap_m)
-    sf = None if on_line and not s0 else (s0, None if on_line else total % course.lap_m)
+    goal = total % course.lap_m
+    sf = None if not s0 and not goal else (s0, goal or None)
     with open(args.out, "w", encoding="utf-8") as f:
-        f.write(course_svg(course, args.marks, spans, args.v_off, start_finish=sf))
+        f.write(course_svg(course, args.marks, spans, args.v_off, start_finish=sf,
+                           control=control_m(p["course"])))
     print("コース図: %s" % args.out)
     print("番号 | 位置 m | ID | 緯度, 経度 | 加速区間 m")
     for n, m in enumerate(sorted(args.marks), 1):

@@ -291,10 +291,32 @@ class TestFitBurn(unittest.TestCase):
         self.assertAlmostEqual(r["drum_decel"], 0.4, delta=0.01)
 
 
+def pre_practice_params() -> dict:
+    """10/24 の練習走行より前（乾いた路面・始動の遅れ 0.5 s・停止の行き過ぎなし）のモデル。
+
+    同梱の motegi_2026.json は練習走行の実測で較正し直してあるので、シミュレータそのものの
+    振る舞いを確かめるテストは、こちらの固定した値で走らせる。
+    """
+    p = ss.load_params(ss.DEFAULT_PARAMS)
+    p["course"] = {k: v for k, v in p["course"].items()
+                   if k not in ("line_alt_m", "_line_alt_m", "guard_free_zones_m", "_guard_free_zones_m",
+                                "guard_free_min_kmh")}
+    p.pop("phases", None)
+    p.pop("_phases", None)
+    p["vehicle"] = dict(p["vehicle"], crr=0.00164, k_aero=0.000384)
+    p["burn"] = {k: v for k, v in p["burn"].items() if k not in ("cut_lag_s", "_cut_lag_s")}
+    p["restart"] = dict(p["restart"], delay_s=0.5)
+    return p
+
+
+def without_notes(d: dict) -> dict:
+    return {k: v for k, v in d.items() if not k.startswith("_")}
+
+
 class TestSimulate(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.p = ss.load_params(ss.DEFAULT_PARAMS)
+        cls.p = pre_practice_params()
         cls.course = ss.course_from_params(cls.p)
         cls.marks = [400.0, 800.0, 1400.0]
         cls.base = ss.simulate(cls.p, cls.course, 32.5, marks=cls.marks, v_on=16.0)
@@ -347,6 +369,52 @@ class TestSimulate(unittest.TestCase):
         r = ss.simulate(self.p, self.course, 32.5, marks=self.marks, v_on=16.0, fail_restarts=3)
         self.assertEqual(r["burns"], self.base["burns"])
         self.assertLess(abs(r["time_s"] - self.base["time_s"]), 20.0)
+
+    def test_cut_lag_overshoots_the_cut_speed(self):
+        # 停止の合図からエンジンが止まるまでの遅れ（cut_lag_s）の間は燃やし続ける
+        lagged = dict(self.p, burn=dict(self.p["burn"], cut_lag_s=0.5))
+        trace, trace_lag = [], []
+        ss.simulate(self.p, self.course, 32.5, marks=self.marks, v_on=16.0, trace=trace, trace_every=1)
+        r = ss.simulate(lagged, self.course, 32.5, marks=self.marks, v_on=16.0, trace=trace_lag, trace_every=1)
+        top = max(kmh for _, _, lap, _, kmh, _, _ in trace if lap == 3)
+        top_lag = max(kmh for _, _, lap, _, kmh, _, _ in trace_lag if lap == 3)
+        self.assertGreater(top_lag, top + 0.5)
+        self.assertGreater(r["fuel_ml"], self.base["fuel_ml"])
+        self.assertLess(r["time_s"], self.base["time_s"])
+
+    def test_restart_delay_is_spent_coasting(self):
+        slow = dict(self.p, restart=dict(self.p["restart"], delay_s=1.6))
+        r = ss.simulate(slow, self.course, 32.5, marks=self.marks, v_on=16.0)
+        self.assertGreater(r["time_s"], self.base["time_s"])
+
+    def test_line_alt_dip_recovers_speed(self):
+        # 走行ラインの補正で 300〜360 m が下りになり、惰行で速度が戻る
+        p = dict(self.p, course=dict(self.p["course"], line_alt_m=[[200, 0.0], [290, 0.5], [380, -0.2], [460, 0.0]]))
+        dipped = ss.course_from_params(p)
+        self.assertAlmostEqual(dipped.slope(1000), self.course.slope(1000))
+        crr, k = p["vehicle"]["crr"], p["vehicle"]["k_aero"]
+        s, v = 300.0, 16.0 / 3.6
+        while s < 360:
+            s, v = ss.coast_step(dipped, s, v, crr, k, 0.1)
+        self.assertGreater(v * 3.6, 17.0)
+
+    def test_guard_waits_in_free_zone(self):
+        # 保険の加速を待つ区間では 16 km/h を割っても始動しない
+        free = dict(self.p, course=dict(self.p["course"], guard_free_zones_m=[[0, 2341.38]], guard_free_min_kmh=12.0))
+        r = ss.simulate(free, self.course, 32.5, marks=self.marks, v_on=20.0)
+        guard = ss.simulate(self.p, self.course, 32.5, marks=self.marks, v_on=20.0)
+        self.assertLess(r["burns"], guard["burns"])
+        for _, pos, kmh in r["starts"][1:]:
+            self.assertTrue(min(abs(pos - m) for m in self.marks) < 5.0 or kmh <= 12.1, (pos, kmh))
+
+    def test_place_marks_tries_several_starts(self):
+        lap_target = ss.steady_lap_target(self.p["course"], self.course, self.p["target_s"])
+
+        def fuel(starts):
+            marks, v_off = ss.place_marks(self.p, self.course, 2, lap_target, 17.0, starts=starts)
+            return ss.fit_v_off(self.p, self.course, marks, lap_target, 17.0)[1]
+
+        self.assertLessEqual(fuel(3), fuel(1) + 1e-6)
 
     def test_speed_rule_respects_no_burn_zone(self):
         zone = (1500, 2150)
@@ -457,10 +525,21 @@ class TestSimulate(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ss.plan_from_params(dict(self.p, phases=bad))
 
+    def test_bundled_race_plan_finishes_with_margin(self):
+        # 決勝用（motegi_2026.json の phases）は 1 周 3 回で、補正なしの最長でも規定まで 30 秒以上残る
+        p = ss.load_params(ss.DEFAULT_PARAMS)
+        course = ss.course_from_params(p)
+        pol = ss.plan_from_params(p)
+        self.assertEqual(len(pol["marks"]), 3)
+        r = ss.evaluate(p, course, pol)
+        self.assertLess(r["time_s"], p["course"]["limit_s"] - 30)
+        self.assertLessEqual(r["burns"], 22)
+
     def test_bundled_practice_plan_covers_the_measurements(self):
         p = ss.load_params(os.path.join(os.path.dirname(ss.DEFAULT_PARAMS), "practice_motegi_2026.json"))
+        # 練習プランは練習走行の前に作ったまま据え置いてあるので、そのときのモデルと同じ値であること
         for key in ("course", "vehicle", "burn", "restart"):
-            self.assertEqual(p[key], self.p[key], key)      # 本番用と同じモデルで計算する
+            self.assertEqual(without_notes(p[key]), without_notes(self.p[key]), key)
         pol = ss.plan_from_params(p)
         r = ss.evaluate(p, self.course, pol)
         self.assertLess(r["time_s"], p["course"]["limit_s"] - 60)

@@ -1,5 +1,5 @@
-﻿﻿# UNOR4_Chibi-T_EFI
-
+# UNOR4_Chibi-T_EFI
+  
 Arduino UNO R4（RA4M1）/ 互換環境上で動作するエコラン車両用ECUプログラム
 
 ## 概要
@@ -22,6 +22,8 @@ Arduino UNO R4（RA4M1）/ 互換環境上で動作するエコラン車両用EC
 - [src/map_console.cpp](src/map_console.cpp) : USB シリアル経由の MAP 書き換えコンソール
 - [src/fastestdigitalRW.hpp](src/fastestdigitalRW.hpp) : ボード別最速 GPIO
 - [tools/send_map.py](tools/send_map.py) : PC 側の MAP 転送スクリプト
+- [tools/strategy_sim.py](tools/strategy_sim.py) : 加速・惰行パターンの走行シミュレータ（パラメータは `tools/strategy/`）
+- [document/motegi_strategy_2026.md](document/motegi_strategy_2026.md) : 2026 全国大会（もてぎ）の走行戦略
 - [lib/AGTimer_R4_Library](lib/AGTimer_R4_Library) : 周期タイマ
 - [platformio.ini](platformio.ini) : ビルド環境定義
 - microSD/ : MAP 用 CSV（`tools/send_map.py` でそのまま転送できる）
@@ -53,6 +55,7 @@ pio device monitor -b 115200
 | PERIMETER_MM | 1548 | タイヤ周長(mm) |
 | TACHO_RPM_MAX | 6000 | レブリミット <BR> （回転数上限保護） |
 | Dwell_Time_US | 5000 | ドゥエル時間（us） <BR> IGコイルへの充電時間 |
+| Dwell_Time_CRANK_US | 6500 | クランキング中（スタータON中）のドゥエル時間（us） <BR> スタータ負荷による電圧低下の補償 |
 | start_RPM | 1500 | スタータ自動停止の判定回転数（RPM） <BR> MAP切替用の専用定数ではない |
 
 始動時・通常時で切り替わる専用定数（`start_INJ_time` 等）は無い。  
@@ -100,14 +103,14 @@ LOW アクティブ出力注意 (INJ/IGN/STR/DISRESET)。
 2. 周期関数 [`Routine`](src/main.cpp):
    - スタート/キル状態評価
    - **スタータステートマシン** (`StarterState`): キルスイッチON時にスタートボタン押下（エッジ）でクランキング開始。  
-     `start_RPM` 以上を 0.1秒 維持で始動成功（スタータ自動停止）、2秒タイムアウトで始動失敗（再押しで再試行可）。  
+     `start_RPM` 以上を 0.1秒 維持で始動成功（スタータ自動停止）、1.5秒（`STARTER_TIMEOUT_MS`）タイムアウトで始動失敗（再押しで再試行可）。  
      低rpm帯のMAP行（400/800/1200rpm、`inj_end_ca`=20）が始動用パラメータとして自動的に採用される  
      （始動専用のMAP切替フラグは無い。[MAP](#map) 節参照）。
 
      ```txt
      STR_IDLE → [ボタン押下(エッジ)+キルスイッチON] → STR_CRANKING
      STR_CRANKING → [start_RPM以上を0.1秒維持] → STR_STARTED（スタータOFF）
-     STR_CRANKING → [2秒タイムアウト] → STR_FAILED（スタータOFF・ENG_ON OFF）
+     STR_CRANKING → [1.5秒タイムアウト] → STR_FAILED（スタータOFF・ENG_ON OFF）
      STR_FAILED → [ボタン再押し(エッジ)] → STR_CRANKING
      キルスイッチOFF → 常に STR_IDLE へ強制リセット（`Launch` はリセットしない）
      ```
@@ -155,10 +158,10 @@ gasml += ( (Δt * 0.0000007) + 0.0015 ) / 1.5073
 ## 点火制御
 
 - 進角: `calculatedIGN_CA`  
-- ドゥエル時間（µs）: `Dwell_Time_US`
-  - ドゥエル時間をクランク角に変換: `Dwell_Time_CA = Dwell_Time_US * 360 / tachoWidth`
+- ドゥエル時間（µs）: `Dwell_Time_US`（クランキング中は `Dwell_Time_CRANK_US`）。適用中の値は `Dwell_Time_Act_US`
+  - ドゥエル時間をクランク角に変換: `Dwell_Time_CA = Dwell_Time_Act_US * 360 / tachoWidth`
 - 条件: `Ne_deg >= (360 - calculatedIGN_CA - Dwell_Time_CA)` で点火 LOW  
-- 保持: クランク角が `360 - calculatedIGN_CA` に達する or `Dwell_Time_US` 経過で HIGH 戻し  
+- 保持: クランク角が `360 - calculatedIGN_CA` に達する or `Dwell_Time_Act_US` 経過で HIGH 戻し  
 - 点火: HIGH 戻しの瞬間にスパークプラグから放電
 
 ## MAP
@@ -315,9 +318,20 @@ python tools/send_map.py microSD/RPM_2024MOTEGI.CSV --legacy-inj-end-ca 680
 | `TELEM ON [ms]` | 機械可読テレメトリを開始<BR>（既定 OFF、100〜2000ms、100ms 単位） | 可 |
 | `TELEM OFF` | 停止して従来の 2Hz 人間向け出力へ戻す | 可 |
 | `TELEM?` | `on=` / `ms=` / `drop=`（取りこぼし数）を表示 | 可 |
-| `VER` | `OK VER <fw> proto=<n>`<BR>（現行 `1.3.0` / `proto=5`。v3 で MAP を 4 列化、<BR>v4 でテレメトリに `inj_end` を追加、<BR>v5 で `inj_end` を `ign` の直後へ移動） | 可 |
+| `VER` | `OK VER <fw> proto=<n>`<BR>（現行 `1.4.0` / `proto=5`。v3 で MAP を 4 列化、<BR>v4 でテレメトリに `inj_end` を追加、<BR>v5 で `inj_end` を `ign` の直後へ移動） | 可 |
 | `PING` | `OK PONG`<BR>（副作用のない疎通確認・レイテンシ計測） | 可 |
+| `DIAG` | 直前のリセット原因（`rst=POR/PIN/WDT/SW/LVD/UPLOAD`）、自動リセットの累計（`count=`）、<BR>記録した異常（`fault=HARD/STACK`、`pc=` / `lr=` / `cfsr=` / `hfsr=` / `exc=` / `task=`）、<BR>積算値を引き継いだか（`carry=`）を表示 | 可 |
+| `DIAG CLEAR` | 記録と自動リセットの累計を消す | 可 |
+| `DIAG HANG` / `DIAG FAULT` | 自動復旧の確認用に、わざとハング／HardFault を起こす | **不可** |
 | `HELP` | コマンド一覧 | 可 |
+
+### ハング時の自動復旧（ウォッチドッグ）
+
+[src/health.cpp](src/health.cpp) が WDT（約 1.4 秒）を回す。**Routine（AGT 割込み）と `statusTask` の両方が動いているときだけ**更新するので、どちらが止まってもリセットして、スタータ操作を受け付ける状態に戻る。  
+HardFault とスタックあふれ（`configCHECK_FOR_STACK_OVERFLOW=2`）は、PC・例外番号（`exc=0` はタスク、`16+n` は IRQn）・タスク名を VBATT バックアップレジスタに記録してからリセットする。  
+落ちた箇所は `arm-none-eabi-addr2line -e .pio/build/uno_r4_minima/firmware.elf <pc>` で引ける。
+
+自動リセット（`WDT` / `SW`）のときだけ、走行時間・距離・燃料を引き継ぐ。ロガーの周回数を 0 に戻さないためで、リセットボタン（`PIN`）・電源投入（`POR`）・書き込み（`UPLOAD`）では従来どおり 0 から始める。
 
 セッションを開いたままホストが消えた場合に備え、**最終受信から 5 秒で** `ERR SESSION_TIMEOUT` を返してセッションを破棄する。  
 （テレメトリがミュートされたまま復帰しなくなるのを防ぐ）
@@ -486,7 +500,7 @@ Ardu-Stim で回転信号を与えつつ、STR_IN/ENGOFF_IN 相当を操作す�
       `start_RPM` 到達から約100ms 後に STR_OUT が HIGH に戻る（`STR_STARTED`）
 - [x] rpm を `start_RPM` 未満に維持したまま STR_IN を ON → STR_OUT が LOW になってから
       2000ms 後に STR_OUT が HIGH に戻る（`STR_FAILED`）
-- [ ] `STR_FAILED` 状態で STR_IN を離さず維持 → 再クランキングしない（エッジ検出のみで再始動する設計の確認）  
+- [x] `STR_FAILED` 状態で STR_IN を離さず維持 → 再クランキングしない（エッジ検出のみで再始動する設計の確認）  
       ※Ardu-Stimベンチ環境では検証不可: STR_IN が実車配線の `74HC14` シュミットトリガを経由せず
       MCUへ直結されるため、ボタン押下中に生ピンが数千回/秒オーダーでチャタリングし、
       OFF→ONエッジが繰り返し検出されて `STR_FAILED` から `STR_CRANKING` へ誤って再突入し続ける
@@ -527,11 +541,13 @@ AGTimer: [`AGTimer.init(period_us, callback)`](lib/AGTimer_R4_Library/src/AGTime
 
 | ポート | 形式 | 周期 | フィールド | 出力先 |
 | --- | --- | --- | --- | --- |
-| `Serial1` (HW UART) | CSV + XORチェックサム | **10Hz (100ms)** | RPM, INJ(ms), IGN_CA, INJ_END(CA), speed, distance, fuel(ml), km/L, worktime | ロガー (ESP32) <BR>https://github.com/todateman/Chibi-T_Furoshiki_Logger |
+| `Serial1` (HW UART) | CSV + XORチェックサム | **10Hz (100ms)** | RPM, INJ(ms), IGN_CA, INJ_END(CA), speed, distance, fuel(ml), km/L, worktime(s, 0.1s分解能) | ロガー (ESP32) <BR>https://github.com/todateman/Chibi-T_Furoshiki_Logger |
 | `Serial` (USB CDC) | タブ区切り | 2Hz (500ms) | 上記 + Ne_deg | PC (USB) |
 
 `Serial1` の行末は `*XX`（XX = 先頭から `*` 直前までの全バイトのXOR、16進2桁）。  
 ロガーは不一致の行を捨てる。`INJ_END(CA)` は MAP 範囲外では前回値が残る。  
+エンジン停止中（`ENG_ON=false`: キルスイッチOFF・スタータ待機・始動失敗）は、`INJ(ms)` / `IGN_CA` / `INJ_END(CA)` を 0 で出力する。  
+ロガー側でエンジン停止状態を判別できる（USBテレメトリは MAP 参照値のままで、`flags` の bit0 が `ENG_ON`）。  
 INJ_END を IGN_CA の直後に挿入したため、**EFI とロガーは必ず同時に更新する**（旧形式とは非互換）。
 
 speed は 0.1km/h 分解能。停止時は最終パルス経過時間で減衰し、約8秒後に 0.0 へ。
@@ -550,10 +566,10 @@ java -jar "$env:USERPROFILE\.vscode\extensions\jebbs.plantuml-2.18.1\plantuml.ja
   - ROUTINE_CYCLE_US = 24µs
   - PERIMETER_MM = 1548mm
   - 速度上限 99.9km/h (内部999)
-  - カム同期タイムアウト ≈ 50ms
+  - カム同期タイムアウト ≈ 500ms
   - RPMゼロ化 ≈ 1.2s無信号
   - 速度強制ゼロ ≈ 8s無信号
-  - 点火保持 5ms
+  - 点火保持 5ms（クランキング中 6.5ms）
 
 ## 拡張アイデア (TODO)
 
@@ -561,7 +577,7 @@ java -jar "$env:USERPROFILE\.vscode\extensions\jebbs.plantuml-2.18.1\plantuml.ja
   (現状では処理遅れに起因すると思われる過大な進角角度を設定している)
 - [x] ビルド不要の MAP 書き換え (USB シリアル CSV 転送 + EEPROM 永続化)
 - [x] スタータ制御の自動化（Issue #11）  
-  (`start_RPM`×0.1秒維持で自動停止、2秒タイムアウトで失敗検出・再試行可。始動専用MAPフラグは廃止しMAP方式に一本化)
+  (`start_RPM`×0.1秒維持で自動停止、1.5秒タイムアウトで失敗検出・再試行可。始動専用MAPフラグは廃止しMAP方式に一本化)
 - [ ] SD から MAP 読込実装 (`parseCSV`) ※ SD が使えるようになったら `mapParseCsvLine()` を再利用
 - [ ] AFR センサ補正ロジック (`updateAFR`)
 - [ ] クランク角推定のドリフト補正（非エンコーダ時）
@@ -593,6 +609,23 @@ java -jar "$env:USERPROFILE\.vscode\extensions\jebbs.plantuml-2.18.1\plantuml.ja
 評価結果:
 
 - [document/10HzLogging_debug_report_20260912.md](document/10HzLogging_debug_report_20260912.md)
+
+## 走行戦略
+
+### 2026全国大会
+
+- [document/motegi_strategy_2026.md](document/motegi_strategy_2026.md) : 2026 全国大会の走行戦略。  
+  加速開始位置の地図、周回ごとの目標タイム、トラブル時の対応、練習走行で測るものをまとめてある
+- [tools/strategy_sim.py](tools/strategy_sim.py) : 戦略書の数値を出した走行シミュレータ。  
+  パラメータは [tools/strategy/motegi_2026.json](tools/strategy/motegi_2026.json) にあり、練習走行後に書き換えて再計算する
+- [tools/strategy/practice_motegi_2026.json](tools/strategy/practice_motegi_2026.json) : 練習走行（2026/10/24）のプラン。  
+  1〜3 周目は測定用のパターン、4 周目から推奨パターンで走る（`phases` に周ごとのパターンを書いてある）
+
+```sh
+python3 tools/strategy_sim.py optimize        # 加速位置・停止速度・感度を出す
+python3 tools/strategy_sim.py --params tools/strategy/practice_motegi_2026.json plan   # 練習走行のプランを確かめる
+python3 tools/test_strategy_sim.py            # テスト（走行ログ不要）
+```
 
 ## ライセンス
 

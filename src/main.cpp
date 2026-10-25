@@ -6,6 +6,7 @@
 #include <Arduino_FreeRTOS.h>
 #include "map_store.h"
 #include "map_console.h"
+#include "health.h"
 
 // IRAM_ATTR が未定義の場合は空定義を追加（ESP32等でなければ不要）
 #ifndef IRAM_ATTR
@@ -17,7 +18,6 @@
 //-----------------------------------------------------------------------------
 void IRAM_ATTR WH_PULSE_ISR();
 void IRAM_ATTR ReadNe_ISR();
-void IRAM_ATTR G_PULSE_ISR();
 
 //-----------------------------------------------------------------------------
 // 定数・設定
@@ -31,6 +31,15 @@ void IRAM_ATTR G_PULSE_ISR();
 #define PERIMETER_MM         1548UL   // [mm]
 #define TACHO_RPM_MAX        6000     // レブリミット（RPM）※これを超えると燃料噴射・点火停止
 #define Dwell_Time_US        5000     // ドゥエル時間（IGコイルへの充電時間）[us]
+// クランキング中（スタータON中）のドゥエル時間 [us]。スタータ負荷でコイル端子電圧が12〜13Vに
+// 下がり、5msでは内蔵イグナイタの電流制限(約7.9A)の7〜8割までしか充電できないため延ばす。
+// 必要時間の目安は 約77mVs ÷ 通電中の端子電圧（Issue #12 で実測）。
+#define Dwell_Time_CRANK_US  6500
+#define TACHO_TIMEOUT_US     1200000UL // Zパルスがこの時間途絶えたら回転数を0とみなす [us]
+// カムパルスがこの時間途絶えたら同期喪失とみなし cycleReset() を呼び直す [us]。
+// クランキング1サイクル(600rpmで200ms)より長くすること。短いと毎サイクル発動し、
+// 点火済みフラグが消えて通電延長・二重点火が起きる（Issue #12 で実測）。
+#define CAM_SYNC_TIMEOUT_US  500000UL
 
 const uint8_t NE_A_IN      = 2;   // クランク角エンコーダAパルス(360°で360パルス)
 const uint8_t NE_B_IN      = 8;   // クランク角エンコーダBパルス(360°で360パルス)
@@ -61,7 +70,10 @@ SPISettings ma735Settings(12000000, MSBFIRST, SPI_MODE0);
 volatile unsigned long tachoBefore  = 0;  // NE_Z_INの立ち上がりで更新
 volatile unsigned long tachoAfter   = 0;  // NE_Z_INの立ち下がりで更新
 volatile unsigned long tachoWidth   = 0;  // NE_Z_INのパルス幅（us）
-volatile uint16_t      tachoRpm     = 0;  // NE_Z_INの回転数（RPM）
+volatile uint16_t      tachoRpm     = 0;  // NE_Z_INの回転数（RPM）※直近1回転
+// 直近2回転(720CA)の平均回転数（RPM）。単気筒4ストは行程によって1回転ごとの速度が
+// 交互に変わるため、MAP参照・始動判定・外部出力にはこちらを使う。
+volatile uint16_t      tachoCycleRpm = 0;
 volatile int16_t       Ne_deg       = 0;  // クランク角度（CA）
 volatile int16_t       Ne_rev       = 0;  // クランク回転数（回転数）
 
@@ -87,6 +99,7 @@ volatile bool     mapOutOfRange      = false;
 // ISRから書くが、uint8_tの単一ストアはtearingしないためロック不要。
 volatile uint8_t  activeMapRow       = 255;
 volatile int16_t  Dwell_Time_CA      = 0; // ドゥエル時間（IGコイルへの充電時間）をクランク角度（CA）へ変換
+volatile uint16_t Dwell_Time_Act_US  = Dwell_Time_US; // 適用中のドゥエル時間（us）※Zパルスごとに更新
 volatile int16_t  INJ_STR_CA         = 0; // 燃料噴射開始タイミング角度（CA）※INJ_END_CAと噴射時間から逆算
 volatile uint8_t  INJ_Status         = 1; // 燃料噴射状態（0:OFF, 1:ON, 2:ON_HOLD）
 volatile uint8_t  IGN_Status         = 1; // 点火状態（0:OFF, 1:ON, 2:ON_HOLD）
@@ -103,6 +116,7 @@ volatile bool inj360Reset = false;        // 360CA安全リセットフラグ
 volatile bool G_Pulse      = false;       // G_INのパルス状態（立ち上がり）
 volatile bool G_Pulse_Flag = false;       // G_INのパルスフラグ（立ち上がり）
 volatile bool CycleReset   = false;       // サイクルリセットフラグ（立ち上がり）
+volatile bool CycleSynced  = false;       // 頭出し済みフラグ（電源投入・リセット直後はNe_degが実角度と未対応）
 
 bool Launch = false;                      // スタートフラグ（エンジン始動）
 bool startState = HIGH;                   // スタートスイッチ状態（OFF=HIGH, ON=LOW）
@@ -116,18 +130,20 @@ enum StarterState : uint8_t {
 };
 StarterState  starterState    = STR_IDLE; // 現在のスタータ状態（IDLE:待機, CRANKING:クランキング中, STARTED:始動成功, FAILED:始動失敗）
 uint16_t      start_RPM       = 1500;     // 始動成功判定の回転数（RPM）
+uint16_t      firing_RPM      = 1000;     // 初爆判定の回転数（RPM）※クランキングのみでは届かない回転数
 unsigned long strCrankStartMs = 0;        // クランキング開始時刻（ms）
 unsigned long starterFirstMs  = 0;        // start_RPM到達判定の開始時刻（ms）
 bool          starterActive   = false;    // start_RPM維持判定中フラグ
-unsigned long STARTER_TIMEOUT_MS = 1000;  // スタータタイムアウト（ms）
+unsigned long STARTER_TIMEOUT_MS = 1500;  // スタータタイムアウト（ms）
 
 volatile float gasml       = 0.0;         // 燃料消費量（ml）
 volatile float INJ_timems  = 0.0;         // 燃料噴射時間（ms）
 volatile float dispergas   = 0.0;         // 燃費（km/L）
 unsigned long starttime    = 0;           // エンジン始動時間（ms）
-volatile uint16_t worktime = 0;           // エンジン稼働時間（秒）
+volatile uint32_t worktime = 0;           // エンジン稼働時間（0.1秒単位）
 
 volatile float usecperdig = 1.0;          // NE_A_INの1パルスあたりの時間（us）
+volatile uint32_t routineBeat = 0;        // Routine()の実行回数（ウォッチドッグがRoutineの停止を見分けるため）
 
 //-----------------------------------------------------------------------------
 // MAPテーブル
@@ -189,30 +205,37 @@ void IRAM_ATTR ReadNe_ISR() {
 
   if (fastestdigitalRead(NE_Z_IN)) {
     unsigned long now = micros();
+    unsigned long prevWidth = tachoWidth;
     tachoWidth = now - tachoBefore;
     tachoBefore = now;
     // 整数演算で RPM 計算（浮動小数点除算を避け ISR 実行時間を短縮 信号出力時の処理遅れ～1°）
     uint16_t _tachoRpm = (tachoWidth > 0) ? (uint16_t)(60000000UL / tachoWidth) : 0;
     if (_tachoRpm < 10000) {  // 10000 RPMを超える異常値は無視
       tachoRpm = _tachoRpm;
+      // 720CA平均。停止明けの1回転目は前回幅が停止時間を含むため、直近1回転の値を使う。
+      if (prevWidth > 0 && prevWidth < TACHO_TIMEOUT_US)
+        tachoCycleRpm = (uint16_t)(120000000UL / (tachoWidth + prevWidth));
+      else
+        tachoCycleRpm = _tachoRpm;
       // ドゥエル時間を回転数に応じたクランク角度に変換
-      Dwell_Time_CA = (int16_t)(Dwell_Time_US * 360.0 / tachoWidth);
+      // クランキング中だけ延長する。通電開始角と通電時間の上限が食い違わないよう、同じ値を使う。
+      Dwell_Time_Act_US = (starterState == STR_CRANKING) ? Dwell_Time_CRANK_US : Dwell_Time_US;
+      // 整数演算にする（ISRでのdouble除算はソフト演算で数µsかかる。切り捨てなので結果は同じ）
+      Dwell_Time_CA = (int16_t)((uint32_t)Dwell_Time_Act_US * 360UL / tachoWidth);
     }
-    if (Ne_deg > 360 && G_Pulse_Flag) {
+    // カムパルスはタイミングチェーンのテンションで揺れるため、360〜720CA（爆発・排気行程）に
+    // 入る前提で Ne_deg > 360 の Z でだけ頭出しする。ただし電源投入・リセット直後は Ne_deg が
+    // 実角度と対応しておらず、停止位置によってはこの条件で 360CA ずれたまま固定されるため、
+    // 最初の1回だけはカムパルス後の最初の Z で頭出しする（Issue #12）。
+    // 走行中の再始動でも同じずれが残りうるため、スタートスイッチを押すたびに CycleSynced を
+    // 戻して頭出しをやり直す（Routine() のスタートスイッチ処理）。
+    if (G_Pulse_Flag && (Ne_deg > 360 || !CycleSynced)) {
       Ne_deg = 0;
       G_Pulse_Flag = false;
       CycleReset = true;
+      CycleSynced = true;
     }
   }
-}
-
-// G_PULSE_ISR：カム角センサ割込み（G_IN）
-void IRAM_ATTR G_PULSE_ISR() {
-  if (!G_Pulse) {
-    G_Pulse = true;
-    G_Pulse_Flag = true;
-  }
-  // リリース状態は Routine 内で処理
 }
 
 //-----------------------------------------------------------------------------
@@ -231,8 +254,10 @@ int16_t readMA735SPI() {
   if (diff < -32767) {
     unsigned long now = micros();
     Ne_rev++;
-    if (diff < 262)
+    if (diff < 262) {
       tachoRpm = (uint16_t)(60000000.0 / (now - last_rd_time));
+      tachoCycleRpm = tachoRpm;
+    }
     last_rd_time = now;
     if (G_Pulse_Flag) {
       Ne_rev = 0;
@@ -255,7 +280,7 @@ void updateEngineMap() {
   // 1バイトのストアで行われるため、参照中にテーブルが壊れることはない。
   const MapTable &map = mapGetActive();
   for (uint8_t i = 0; i < map.count; i++) {
-    if (tachoRpm < map.e[i].rpm) {
+    if (tachoCycleRpm < map.e[i].rpm) {
       calculatedINJ_time = map.e[i].inj_time;
       calculatedIGN_CA   = map.e[i].ign_ca;
       calculatedINJ_END_CA = map.e[i].inj_end_ca;
@@ -305,6 +330,8 @@ void cycleReset() {
 // Routine(): AGTimerより周期実行されるリアルタイム処理
 //-----------------------------------------------------------------------------
 void Routine() {
+  routineBeat++;
+
   // スタートスイッチの状態を更新(OFF=HIGH, ON=LOW)
   startState = fastestdigitalRead(STR_IN);
 
@@ -324,7 +351,9 @@ void Routine() {
       Ne_deg += (int16_t)(ROUTINE_CYCLE_US / usecperdig);
   }
   
-  // カム角センサのパルス処理
+  // カム角センサのパルス処理。割込み（CHANGE）は使わずここでポーリングする。
+  // 24µs周期は6000rpmで約0.9CAで、カムパルスはZの約30CA前に終わるためZまでに必ず拾える。
+  // 割込みにすると停止位置でセンサがチャタリングしたとき、優先度14のRoutineと全タスクが止まる。
   if (fastestdigitalRead(G_IN) == LOW) {
     if (!G_Pulse) {
       G_Pulse = true;
@@ -340,7 +369,7 @@ void Routine() {
     lastZMicros = micros();
   }
   // カムパルスが来ずに一定時間経過したら、自動的に cycleReset() を繰り返し呼び出す
-  if (micros() - lastZMicros > 50000UL) {
+  if (micros() - lastZMicros > CAM_SYNC_TIMEOUT_US) {
     cycleReset();
     lastZMicros = micros();
   }
@@ -366,6 +395,10 @@ void Routine() {
         }
       }
       cycleReset();   // キルスイッチ状態に関わらず従来どおり実行
+      // 頭出しをカム基準でやり直す。Ne_deg > 360 の条件だけでは 360CA ずれた位相も
+      // 安定してしまい、一度ずれると始動できないまま続く（2026全国大会の練習走行 LOG0662）。
+      // カムパルスは 510〜690CA（Z の約30°手前で終わる）なので、カム後の最初の Z は必ずサイクルの頭。
+      CycleSynced = false;
     }
   }
   lastStartState = startState;
@@ -376,7 +409,7 @@ void Routine() {
       timeNow_INJ_OFF = micros();
       fastestdigitalWrite(INJ_OUT, HIGH);
       INJ_Status = 1;
-      gasml += (((timeNow_INJ_OFF - timeNow_INJ_ON) * 0.0000007) + 0.0015) / 1.5073;
+      gasml += (((timeNow_INJ_OFF - timeNow_INJ_ON) * 0.0000007f) + 0.0015f) / 1.5073f;  // 単精度（FPU）で計算
     }
     inj360Reset = true;
   }
@@ -403,7 +436,7 @@ void Routine() {
       timeNow_INJ_OFF = micros();
       fastestdigitalWrite(INJ_OUT, HIGH);
       INJ_Status = 1;   // 次の噴射に備えてON状態へ
-      gasml += (((timeNow_INJ_OFF - timeNow_INJ_ON) * 0.0000007) + 0.0015) / 1.5073;
+      gasml += (((timeNow_INJ_OFF - timeNow_INJ_ON) * 0.0000007f) + 0.0015f) / 1.5073f;  // 単精度（FPU）で計算
     }
   }
   
@@ -421,7 +454,7 @@ void Routine() {
   // 点火ON_HOLD状態の処理
   if (IGN_Status == 2) {
     // 進角角度に達したら or ドゥエル時間が経過したらOFF
-    if (Ne_deg >= 360 - calculatedIGN_CA || micros() - timeNow_IGN_ON >= Dwell_Time_US) {
+    if (Ne_deg >= 360 - calculatedIGN_CA || micros() - timeNow_IGN_ON >= Dwell_Time_Act_US) {
       timeNow_IGN_OFF = micros();
       fastestdigitalWrite(IGN_OUT, HIGH);
       IGN_Status = 1;
@@ -444,7 +477,7 @@ void Routine() {
         unsigned long nowMs = millis();                 // 現在時刻(ms)
 
         // 始動成功判定 0.1秒維持チェック（タイムアウトより優先）
-        if (tachoRpm >= start_RPM) {
+        if (tachoCycleRpm >= start_RPM) {
           if (!starterActive) {                           // 始動成功判定開始
             starterActive  = true;                          // 始動成功判定中フラグON
             starterFirstMs = nowMs;                         // 始動成功判定開始時刻(ms)を記録
@@ -461,12 +494,18 @@ void Routine() {
           starterFirstMs = 0;                             // 始動成功判定開始時刻リセット
         }
 
-        // スタータタイムアウト時間を経過した場合は、始動失敗とみなす
+        // スタータタイムアウト時間を経過した場合は、スタータを止める。
+        // 初爆して回転が上がり始めている(firing_RPM以上)なら噴射・点火は続け、
+        // 掛かりかけたエンジンを止めない。届いていなければ始動失敗とみなす。
         if (nowMs - strCrankStartMs >= STARTER_TIMEOUT_MS) {
-          starterState = STR_FAILED;                      // 始動失敗状態へ
           fastestdigitalWrite(STR_OUT, HIGH);             // スタータOFF
           STR_IN_state = false;                           // スタータ入力状態OFF
-          ENG_ON       = false;                           // エンジンONフラグOFF
+          if (tachoCycleRpm >= firing_RPM) {
+            starterState = STR_STARTED;                     // 始動成功状態へ（ENG_ONは維持）
+          } else {
+            starterState = STR_FAILED;                      // 始動失敗状態へ
+            ENG_ON       = false;                           // エンジンONフラグOFF
+          }
         }
         break;
       }
@@ -508,24 +547,59 @@ void statusTask(void *pvParameters) {
 
   for (;;) {
     // ── 高速パス（10Hz）──────────────────────────────────────────────────
+    // 回転数のタイムアウトゼロ化。Serial1(10Hz)に停止後の古い回転数が残らないよう、
+    // 送信の前に毎周期判定する。
+    // tachoBefore は micros() より先に読む。逆順だと、micros() を読んだ直後に Z パルス割込みが
+    // 入ったとき tachoBefore のほうが新しくなり、符号なし減算が桁あふれして運転中に誤ってゼロ化される。
+    const unsigned long lastZUs = tachoBefore;
+    if (micros() - lastZUs >= TACHO_TIMEOUT_US) {
+      tachoRpm = 0;
+      tachoCycleRpm = 0;
+      usecperdig = 1.0;
+      calculatedINJ_time = 0;
+      calculatedIGN_CA = 0;
+      // 噴射・点火を止めた以上、MAPは参照されていない。
+      // ここで255にしないと、GUIが最後に採用した行をハイライトし続ける。
+      activeMapRow = 255;
+    }
+
     INJ_timems = calculatedINJ_time * 0.1f;
+    worktime = Launch ? (millis() - starttime) / 100 : 0;
+
+    // Routineとこのタスクの両方が動いているときだけWDTを更新する。
+    // どちらかが止まれば約1.4秒でリセットし、スタータ操作を受け付ける状態に戻る。
+    healthKick(routineBeat);
+    // 自動リセット後に走行時間・距離・燃料を続きから数えるための保存（ロガーの周回数を0に戻さない）
+    {
+      HealthCarry c;
+      c.launch     = Launch;
+      c.elapsedMs  = Launch ? millis() - starttime : 0;
+      c.distancemm = distancemm;
+      c.gasml      = gasml;
+      healthSaveCarry(c);
+    }
 
     if (Serial1Enabled) {
       // newlib-nano の snprintf は %.1f 非対応のため整数演算で小数1桁を表現
-      unsigned inj10 = (unsigned)(INJ_timems * 10.0f + 0.5f);
+      // キルスイッチ等でエンジン停止中(ENG_ON=false)は、MAP由来の3値を0で出力する。
+      // calculated*はMAP参照値のままで実際の噴射・点火状態を表さないため、
+      // ロガー側で「停止中」と「MAP行の値が0」を区別できるようにする。
+      const bool engRun = ENG_ON;
+      unsigned inj10 = engRun ? (unsigned)(INJ_timems * 10.0f + 0.5f) : 0;
       unsigned gas10 = (unsigned)(gasml * 10.0f + 0.5f);
       unsigned dis10 = (unsigned)(dispergas * 10.0f + 0.5f);
+      unsigned wt10  = (unsigned)worktime;
       int len = snprintf(s1buf, sizeof(s1buf),
-        "%u,%u.%u,%d,%d,%lu.%lu,%u,%u.%u,%u.%u,%u",
-        (unsigned)tachoRpm,           // RPM
+        "%u,%u.%u,%d,%d,%lu.%lu,%u,%u.%u,%u.%u,%u.%u",
+        (unsigned)tachoCycleRpm,      // RPM（720CA平均）
         inj10 / 10, inj10 % 10,       // INJ_timems
-        (int)calculatedIGN_CA,        // calculatedIGN_CA
-        (int)calculatedINJ_END_CA,    // 噴射終了角 [CA]（MAP外では前回値が残る）
+        engRun ? (int)calculatedIGN_CA : 0,       // calculatedIGN_CA
+        engRun ? (int)calculatedINJ_END_CA : 0,   // 噴射終了角 [CA]（MAP外では前回値が残る）
         speed / 10, speed % 10,       // speed
         (unsigned)distance,           // distance
         gas10 / 10, gas10 % 10,       // gasml
         dis10 / 10, dis10 % 10,       // dispergas
-        (unsigned)worktime);          // worktime
+        wt10 / 10, wt10 % 10);        // worktime（秒）
       // 行末に "*XX\n"（XX = 先頭から'*'直前までのXOR）を付ける。ロガーはRXバッファ溢れ等で
       // 欠けた行をこれで検出して捨てる（欠けた行が有効な値として読まれるのを防ぐ）。
       if (len > 0 && len < (int)sizeof(s1buf) - 5) {
@@ -558,7 +632,7 @@ void statusTask(void *pvParameters) {
             "T\t%u\t%lu\t%u\t%u\t%d\t%d\t%lu\t%d\t%u\t%u\n",
             (unsigned)(++telSeq),          // 連番（取りこぼし検出）
             (unsigned long)millis(),       // 時刻 [ms]
-            (unsigned)tachoRpm,            // 回転数 [rpm]
+            (unsigned)tachoCycleRpm,       // 回転数 [rpm]（720CA平均）
             (unsigned)calculatedINJ_time,  // 噴射時間 [x0.1ms]
             (int)calculatedIGN_CA,         // 点火進角 [CA]
             (int)calculatedINJ_END_CA,     // 噴射終了角 [CA]（MAP外では前回値が残る）
@@ -586,10 +660,8 @@ void statusTask(void *pvParameters) {
 
       if (Launch) {
         fastestdigitalWrite(DISRESET_OUT, LOW);
-        worktime = (millis() - starttime) / 1000;
       } else {
         fastestdigitalWrite(DISRESET_OUT, HIGH);
-        worktime = 0;
         starttime = 0;
         distancemm = 0;
         distance = 0;
@@ -598,7 +670,9 @@ void statusTask(void *pvParameters) {
       dispergas = (gasml > 0.0f) ? (float)distance / gasml : 0.0f;
 
       // 停止減衰: 最後のパルスから時間が経つほど再計算速度を小さくする
-      unsigned long age = micros() - speedBefore;
+      // speedBefore も同じ理由で micros() より先に読む。
+      const unsigned long lastWheelUs = speedBefore;
+      unsigned long age = micros() - lastWheelUs;
       if (age > speedWidth && speedWidth > 0) {
         unsigned long decay = (36000UL * PERIMETER_MM) / age;
         if (decay < speed) {
@@ -608,16 +682,7 @@ void statusTask(void *pvParameters) {
       }
 
       // タイムアウトゼロ化
-      if (micros() - tachoBefore >= 1200000UL) {
-        tachoRpm = 0;
-        usecperdig = 1.0;
-        calculatedINJ_time = 0;
-        calculatedIGN_CA = 0;
-        // 噴射・点火を止めた以上、MAPは参照されていない。
-        // ここで255にしないと、GUIが最後に採用した行をハイライトし続ける。
-        activeMapRow = 255;
-      }
-      if (micros() - speedBefore > 8000000UL) {
+      if (age > 8000000UL) {
         speed = 0;
       }
 
@@ -626,7 +691,7 @@ void statusTask(void *pvParameters) {
       // TELEM ON のときは上の機械可読行に一本化し、2つの書式が混ざらないようにする。
       if (SerialUSBEnabled && !mapConsoleTelemetryMuted() && !mapConsoleTelemetryStream()) {
         if (mapConsoleUsbLock(pdMS_TO_TICKS(50))) {
-          Serial.print(tachoRpm);
+          Serial.print(tachoCycleRpm);
           Serial.print("\t");
           Serial.print(INJ_timems, 1);
           Serial.print("\t");
@@ -640,7 +705,7 @@ void statusTask(void *pvParameters) {
           Serial.print("\t");
           Serial.print(dispergas, 1);
           Serial.print("\t");
-          Serial.print(worktime);
+          Serial.print(worktime / 10.0f, 1);
           Serial.print("\t");
           Serial.print(Ne_deg);
           Serial.println();
@@ -657,6 +722,8 @@ void statusTask(void *pvParameters) {
 // setup()
 //-----------------------------------------------------------------------------
 void setup() {
+  // リセット原因はほかの初期化より先に読む（フラグをクリアするため）
+  healthBootInit();
   Serial.begin(115200);
   Serial1.begin(115200);
 
@@ -668,6 +735,23 @@ void setup() {
   Serial.print(F(" ("));
   Serial.print(mapGetActive().count);
   Serial.println(F(" rows)"));
+
+  // ハングからの自動リセットなら、走行中だった積算値を引き継ぐ。
+  // リセットボタン・電源投入では引き継がない（従来どおり0から）。
+  HealthCarry carry;
+  if (healthRestoreCarry(carry)) {
+    Launch = true;
+    starttime = millis() - carry.elapsedMs;
+    if (starttime == 0) starttime = 1;   // 0は「未始動」の印（スタートスイッチ処理）
+    distancemm = carry.distancemm;
+    distance = distancemm / 1000;
+    gasml = carry.gasml;
+  }
+  Serial.print(F("RESET: "));
+  Serial.print(healthResetText(healthLastReset()));
+  Serial.print(F(" auto_count="));
+  Serial.print(healthAutoResetCount());
+  Serial.println(Launch ? F(" (carry over)") : F(""));
 
   pinMode(WH_IN, INPUT_PULLUP);
   pinMode(G_IN, INPUT_PULLUP);
@@ -718,14 +802,16 @@ void setup() {
     attachInterrupt(digitalPinToInterrupt(NE_A_IN), ReadNe_ISR, RISING);
   }
   attachInterrupt(digitalPinToInterrupt(WH_IN), WH_PULSE_ISR, FALLING);
-  attachInterrupt(digitalPinToInterrupt(G_IN), G_PULSE_ISR, CHANGE);
   
   AGTimer.init(ROUTINE_CYCLE_US, Routine);
   AGTimer.start();
-  
-  xTaskCreate(statusTask, "StatusTask", 256, NULL, 2, NULL);
+  healthWatchdogStart();
+
+  // スタックは 256 words だとFault時の拡張例外フレーム（FPU込み104バイト）を含めた余裕が薄いため増やす。
+  // configCHECK_FOR_STACK_OVERFLOW=2（platformio.ini）であふれを検出して記録・リセットする。
+  xTaskCreate(statusTask, "StatusTask", 384, NULL, 2, NULL);
   // MAP書き換えコンソール（statusTaskより低優先度）
-  xTaskCreate(mapConsoleTask, "MapConsole", 256, NULL, 1, NULL);
+  xTaskCreate(mapConsoleTask, "MapConsole", 384, NULL, 1, NULL);
 
   vTaskStartScheduler();
 }

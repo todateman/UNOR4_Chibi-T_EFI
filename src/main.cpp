@@ -30,6 +30,9 @@ void IRAM_ATTR ReadNe_ISR();
 
 #define PERIMETER_MM         1548UL   // [mm]
 #define TACHO_RPM_MAX        6000     // レブリミット（RPM）※これを超えると燃料噴射・点火停止
+// 燃料消費量（gasml）の補正の割る数。大会ごとに「前の値 × ECU積算 ÷ 計量値」で直す。
+// 2026.10.25 全国大会CN燃料の決勝: 1.5073 × ECU 10.0ml ÷ 計量 14.38ml = 1.0482
+#define FUEL_CAL_DIV         1.0482f
 #define Dwell_Time_US        5000     // ドゥエル時間（IGコイルへの充電時間）[us]
 // クランキング中（スタータON中）のドゥエル時間 [us]。スタータ負荷でコイル端子電圧が12〜13Vに
 // 下がり、5msでは内蔵イグナイタの電流制限(約7.9A)の7〜8割までしか充電できないため延ばす。
@@ -409,7 +412,7 @@ void Routine() {
       timeNow_INJ_OFF = micros();
       fastestdigitalWrite(INJ_OUT, HIGH);
       INJ_Status = 1;
-      gasml += (((timeNow_INJ_OFF - timeNow_INJ_ON) * 0.0000007f) + 0.0015f) / 1.5073f;  // 単精度（FPU）で計算
+      gasml += (((timeNow_INJ_OFF - timeNow_INJ_ON) * 0.0000007f) + 0.0015f) / FUEL_CAL_DIV;  // 単精度（FPU）で計算
     }
     inj360Reset = true;
   }
@@ -436,7 +439,7 @@ void Routine() {
       timeNow_INJ_OFF = micros();
       fastestdigitalWrite(INJ_OUT, HIGH);
       INJ_Status = 1;   // 次の噴射に備えてON状態へ
-      gasml += (((timeNow_INJ_OFF - timeNow_INJ_ON) * 0.0000007f) + 0.0015f) / 1.5073f;  // 単精度（FPU）で計算
+      gasml += (((timeNow_INJ_OFF - timeNow_INJ_ON) * 0.0000007f) + 0.0015f) / FUEL_CAL_DIV;  // 単精度（FPU）で計算
     }
   }
   

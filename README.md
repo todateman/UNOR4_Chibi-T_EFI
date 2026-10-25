@@ -150,8 +150,10 @@ INJ_STR_CA = calculatedINJ_END_CA - (calculatedINJ_time * 100[µs] * 360[deg]) /
 燃料量近似:
 
 ```text
-gasml += ( (Δt * 0.0000007) + 0.0015 ) / 1.5073
+gasml += ( (Δt * 0.0000007) + 0.0015 ) / FUEL_CAL_DIV
 ```
+
+`FUEL_CAL_DIV` は大会ごとに「前の値 × ECU積算 ÷ 計量値」で較正する。2026年全国大会の決勝（ECU 10.0 ml、計量 14.38 ml）で 1.5073 → 1.0482 に直した。
 
 係数は実測燃費から逆算したインジェクタ流量補正。
 

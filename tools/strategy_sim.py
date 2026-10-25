@@ -91,7 +91,11 @@ def interp(x: float, xs: list, ys: list) -> float:
 
 
 def inj_ml(inj_ms: float) -> float:
-    """1 噴射あたりの燃料量。src/main.cpp の gasml 積算式と同じ。"""
+    """1 噴射あたりの燃料量。2026 年全国大会までの src/main.cpp の gasml 積算式（割る数 1.5073）。
+
+    既存のログとパラメータの燃料はこの尺度。2026 年全国大会の決勝の計量では、実際の燃料はこの約 1.44 倍
+    だった（以後のファームは FUEL_CAL_DIV = 1.0482）。
+    """
     return (inj_ms * 1000.0 * 0.0000007 + 0.0015) / 1.5073
 
 

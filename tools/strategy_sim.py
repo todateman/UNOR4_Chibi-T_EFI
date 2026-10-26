@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""もてぎオーバルの加速・惰行パターンを試算する走行シミュレータ。
+"""エコマイレッジの加速・惰行パターンを試算する走行シミュレータ（もてぎオーバル・鈴鹿東コース）。
 
     python3 tools/strategy_sim.py fit-coast LOG0369.CSV LOG0503.CSV   # 実走の惰行から走行抵抗
     python3 tools/strategy_sim.py fit-grade LOG0369.CSV LOG0503.CSV --alt-csv alt.csv --out wp.csv
                                                                       # 惰行と標高の測定から周回の標高
     python3 tools/strategy_sim.py fit-burn LOG0645.CSV                # ドラムから加速度・燃料流量
+    python3 tools/strategy_sim.py fit-accel LOG0672.CSV               # 実走から加速度（勾配と走行抵抗を足し戻す）
     python3 tools/strategy_sim.py optimize --target 38:30             # 加速・惰行パターンの探索
     python3 tools/strategy_sim.py --params tools/strategy/practice_motegi_2026.json plan   # JSON に書いたプランの確認
     python3 tools/strategy_sim.py speed-rule                          # 速度だけで判断する規則（比較用）
     python3 tools/strategy_sim.py replay LOG0503.CSV                  # 惰行モデルを実走ログで検証
     python3 tools/strategy_sim.py map --marks 400 800 1400 --v-off 32.5 --out map.svg   # コース図
+    python3 tools/strategy_sim.py --params tools/strategy/suzuka_2027.json --variant rain plan   # 鈴鹿・雨の路面
 
-標準ライブラリのみで動く。パラメータは tools/strategy/motegi_2026.json にあり、
+標準ライブラリのみで動く。パラメータは tools/strategy/motegi_2026.json（既定）と suzuka_2027.json にあり、
 練習走行後は fit-coast / fit-burn の出力でそこを書き換えて optimize を回し直す。
+パラメータ JSON の "variants" に雨の路面などの差分を書くと、--variant でその値に置き換えて走らせる。
 
 モデルは単位質量あたりの加速度だけで閉じている:
 
@@ -20,8 +23,15 @@
     加速: dv/dt = a_drum(v) + beta*d_drum - 惰行抵抗   (ドラム慣性 = 実車質量と仮定)
 
 beta（ドラムの惰行損失をどこまで駆動力に上乗せするか）は実走で確かめるまで決められないので、
-optimize は 0 / 0.5 / 1 の感度を必ず併記する。燃料は ECU 積算値と同じ式なので、
+optimize は 0 / 0.5 / 1 の感度を必ず併記する。burn に accel_real（実走の加速度。fit-accel の出力）が
+あれば、ドラムの代わりにそれを使い、感度は加速度 ±15% にする。燃料は ECU 積算値と同じ式なので、
 絶対燃費ではなくパターン同士の比較に使うこと。
+
+course の lap_m は 1 周の長さ（実際の走行ラインの長さ。ウェイポイントをこの長さに伸縮する）で、
+total_m（公式距離）とは別に持てる。total_m は規定時間と平均速度にだけ使う。
+高低差の大きいコース（鈴鹿）向けに、速度の上限（v_max_zones_m）・加速しない区間（coast_only_zones_m）・
+周の途中の通過時刻（checkpoints_m）を書ける（simulate の説明を参照）。phases の marks_m を空にすると、
+guard_kmh まで落ちたところだけで加速を始める（速度だけで判断する）プランになる。
 
 パラメータ JSON に "phases" を書くと、周ごとにパターンを替えるプランになる（練習走行用）:
 
@@ -64,7 +74,7 @@ G = 9.80665
 #   - load_params / course_from_params / race_span / control_m / steady_lap_target / fuel_slack / plan_from_params /
 #     simulate / evaluate / pick / place_marks の引数・戻り値
 #   - JITTER / HOME_MARGIN_S の意味
-INTERFACE_VERSION = 4
+INTERFACE_VERSION = 5     # 5: course_from_params が course.lap_m（1 周の長さ）を使う。load_params に variant
 
 
 # ---------------------------------------------------------------------------
@@ -99,9 +109,24 @@ def inj_ml(inj_ms: float) -> float:
     return (inj_ms * 1000.0 * 0.0000007 + 0.0015) / 1.5073
 
 
-def load_params(path: str) -> dict:
+def _merge(base: dict, over: dict) -> dict:
+    """over の値で base を上書きした dict（入れ子の dict は項目ごとに上書きする）。"""
+    out = dict(base)
+    for key, val in over.items():
+        if key.startswith("_"):
+            continue
+        out[key] = _merge(base[key], val) if isinstance(val, dict) and isinstance(base.get(key), dict) else val
+    return out
+
+
+def load_params(path: str, variant: str | None = None) -> dict:
+    """パラメータ JSON を読む。variant を渡すと "variants" の同名の項目（雨の路面など）で上書きする。"""
     with open(path, encoding="utf-8") as f:
         p = json.load(f)
+    if variant:
+        if variant not in p.get("variants", {}):
+            raise ValueError("%s に variants.%s がありません" % (path, variant))
+        p = _merge(p, p["variants"][variant])
     p["_dir"] = os.path.dirname(os.path.abspath(path))
     return p
 
@@ -118,9 +143,11 @@ class Course:
     line_alt = [(コース距離 m, 標高差 m), ...] を渡すと、走行ラインがウェイポイントの線と横にずれて
     高さが変わる分（バンクの外側から内側へ移るところなど）を、折れ線で補間して標高に足す。
     両端の外側は 0。
+    v_max = [(開始 m, 終了 m, km/h), ...] を渡すと、その区間ではその速度を超えないようブレーキを踏む
+    （v_cap）。開始 > 終了なら ID 1 をまたぐ区間。
     """
 
-    def __init__(self, path: str, lap_m: float, smooth: int = 9, line_alt=()):
+    def __init__(self, path: str, lap_m: float, smooth: int = 9, line_alt=(), v_max=()):
         with open(path, encoding="utf-8-sig") as f:
             rows = list(csv.DictReader(f))
         self.lat = [float(r["lat"]) for r in rows]
@@ -140,6 +167,15 @@ class Course:
         # 積分ループから毎ステップ引くので 1 m 刻みの表にしておく
         self._slope = [self._slope_at(i + 0.5) + self._line_alt(i + 1.0) - self._line_alt(float(i))
                        for i in range(int(math.ceil(lap_m)))]
+        self.v_max = [(float(a), float(b), float(kmh)) for a, b, kmh in v_max]
+        self._cap = None
+        if self.v_max:
+            self._cap = [min((kmh / 3.6 for a, b, kmh in self.v_max if in_zones(i + 0.5, [(a, b)], lap_m)),
+                             default=math.inf)
+                         for i in range(len(self._slope))]
+        # 符号付き面積（x = 東、y = 北）が正なら左回り
+        area = sum(self.lng[i] * self.lat[(i + 1) % n] - self.lng[(i + 1) % n] * self.lat[i] for i in range(n))
+        self.clockwise = area < 0
 
     def _ground_m(self, lat1, lng1, lat2, lng2) -> float:
         return math.hypot((lat2 - lat1) * 111320.0,
@@ -167,6 +203,12 @@ class Course:
 
     def slope(self, s: float) -> float:
         return self._slope[min(int(s % self.lap_m), len(self._slope) - 1)]
+
+    def v_cap(self, s: float) -> float:
+        """その位置の速度上限 m/s（上限が無ければ inf）。"""
+        if self._cap is None:
+            return math.inf
+        return self._cap[min(int(s % self.lap_m), len(self._cap) - 1)]
 
     def alt_at(self, s: float) -> float:
         """ウェイポイントの線上の標高（line_alt は含めない）。"""
@@ -197,10 +239,29 @@ class Course:
         return self.s[best_i], self.alt[best_i], best_d
 
 
+def in_zones(pos: float, zones, lap: float) -> bool:
+    """周内の位置 pos が [(開始 m, 終了 m), ...] のどれかに入るか。開始 > 終了なら ID 1 をまたぐ区間。"""
+    pos %= lap
+    for a, b, *_ in zones:
+        if (a <= pos <= b) if a <= b else (pos >= a or pos <= b):
+            return True
+    return False
+
+
+def lap_length(c: dict) -> float:
+    """1 周の長さ m（ウェイポイントを伸縮する長さ）。
+
+    course の lap_m（実際の走行ラインの長さ）があればそれ、無ければ公式距離 ÷ 周回数。
+    total_m は公式距離のまま、規定時間と平均速度にだけ使う。
+    """
+    return float(c.get("lap_m", c["total_m"] / c["laps"]))
+
+
 def course_from_params(p: dict, waypoints: str | None = None) -> Course:
     c = p["course"]
     path = waypoints or os.path.join(p["_dir"], c["waypoints"])
-    return Course(path, c["total_m"] / c["laps"], line_alt=c.get("line_alt_m", ()))
+    return Course(path, lap_length(c), smooth=c.get("smooth", 9), line_alt=c.get("line_alt_m", ()),
+                  v_max=c.get("v_max_zones_m", ()))
 
 
 def control_m(c: dict) -> float:
@@ -227,7 +288,7 @@ def race_span(c: dict, lap: float, laps: int | None = None):
 
 def coast_step(course: Course, s: float, v: float, crr: float, k: float, dt_s: float):
     a = -(G * (crr + course.slope(s)) + k * v * v)
-    v = max(v + a * dt_s, 0.0)
+    v = min(max(v + a * dt_s, 0.0), course.v_cap(s))
     return s + v * dt_s, v
 
 
@@ -291,15 +352,27 @@ def _split(rows: list, pred, gap_s: float, tkey: str = "t") -> list:
 # ---------------------------------------------------------------------------
 
 def coast_windows(rows: list, course: Course, win_m: float = 250.0,
-                  skip_s: float = 3.0, min_kmh: float = 14.0) -> list:
+                  skip_s: float = 3.0, min_kmh: float = 14.0, exclude=()) -> list:
     """惰行区間を win_m ごとに区切ったエネルギー収支 (g*ds, ∫v^2 ds, 失ったエネルギー)。"""
     return [(G * ds, iv, dke - G * (hb - ha))
-            for _, _, ds, iv, dke, ha, hb in coast_spans(rows, course, win_m, skip_s, min_kmh)]
+            for _, _, ds, iv, dke, ha, hb in coast_spans(rows, course, win_m, skip_s, min_kmh, exclude)]
+
+
+def _touches(course: Course, sa: float, sb: float, zones) -> bool:
+    """コース上の sa → sb（進行方向）が zones のどれかにかかるか。"""
+    if not zones:
+        return False
+    span = (sb - sa) % course.lap_m
+    return any(in_zones(sa + d, zones, course.lap_m) for d in range(0, int(span) + 1, 5))
 
 
 def coast_spans(rows: list, course: Course, win_m: float = 250.0,
-                skip_s: float = 3.0, min_kmh: float = 14.0) -> list:
-    """惰行区間を win_m ごとに区切った (始点 s, 終点 s, ds, ∫v^2 ds, -Δ(v^2/2), 始点の標高, 終点の標高)。"""
+                skip_s: float = 3.0, min_kmh: float = 14.0, exclude=()) -> list:
+    """惰行区間を win_m ごとに区切った (始点 s, 終点 s, ds, ∫v^2 ds, -Δ(v^2/2), 始点の標高, 終点の標高)。
+
+    exclude（[[開始 m, 終了 m], ...]）にかかる窓は使わない。ログにブレーキの記録が無いので、
+    ブレーキを踏みうる区間（下りのコーナーの手前など）を外すのに使う。
+    """
     out = []
     for seg in _split(rows, lambda r: r["rpm"] == 0 and r["v"] >= min_kmh, gap_s=5.0):
         # エンジン停止直後はクラッチ・エンジンの引きずりが残る
@@ -315,7 +388,7 @@ def coast_spans(rows: list, course: Course, win_m: float = 250.0,
             a, b = seg[i], seg[j]
             sa, ha, off_a = course.nearest(a["lat"], a["lng"])
             sb, hb, off_b = course.nearest(b["lat"], b["lng"])
-            if max(off_a, off_b) <= 30.0:   # コース外（ピットなど）は使わない
+            if max(off_a, off_b) <= 30.0 and not _touches(course, sa, sb, exclude):   # コース外（ピットなど）は使わない
                 iv = 0.0
                 for q in range(i, j):
                     vm = (seg[q]["v"] + seg[q + 1]["v"]) / 7.2
@@ -341,11 +414,12 @@ def solve_coast(windows: list):
 
 
 def cmd_fit_coast(args) -> int:
-    p = load_params(args.params)
+    p = load_params(args.params, args.variant)
     course = course_from_params(p, args.waypoints)
     allw = []
+    excl = p["course"].get("coast_exclude_zones_m", ())
     for path in args.logs:
-        w = coast_windows(load_log(path), course)
+        w = coast_windows(load_log(path), course, exclude=excl)
         allw += w
         if len(w) >= 3:
             crr, k, rms = solve_coast(w)
@@ -508,7 +582,7 @@ def write_waypoints(src: str, dst: str, course: Course, alt_at) -> None:
 
 
 def cmd_fit_grade(args) -> int:
-    p = load_params(args.params)
+    p = load_params(args.params, args.variant)
     course = course_from_params(p, args.waypoints)
     groups = args.groups or list(range(1, len(args.logs) + 1))
     if len(groups) != len(args.logs):
@@ -518,7 +592,8 @@ def cmd_fit_grade(args) -> int:
     span_sets = [[] for _ in order]
     names = [[] for _ in order]
     for path, g in zip(args.logs, groups):
-        span_sets[order.index(g)] += coast_spans(load_log(path), course)
+        span_sets[order.index(g)] += coast_spans(load_log(path), course,
+                                                 exclude=p["course"].get("coast_exclude_zones_m", ()))
         names[order.index(g)].append(os.path.basename(path))
     priors = [("ウェイポイント", list(zip(course.s, course.alt)), args.sigma_wp)]
     for path in args.alt_csv or ():
@@ -623,6 +698,71 @@ def cmd_fit_burn(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# fit-accel: 実走ログから加速度（勾配と走行抵抗を足し戻した値）
+# ---------------------------------------------------------------------------
+
+def fit_accel(rows: list, course: Course, crr: float, k: float, bin_kmh: int = 4,
+              win_s: float = 1.0, min_n: int = 5) -> dict:
+    """エンジンが回っている 1 秒ごとの速度変化に、勾配と走行抵抗の分を足し戻して速度帯ごとの中央値を取る。
+
+    噴射の列があるログ（22 列形式）は 1,800 rpm 超かつ噴射ありの窓、無いログは 1,800 rpm 超の窓を使う。
+    燃料流量は噴射時間から（inj_ml の尺度。噴射の列が無ければ None）。
+    """
+    tkey = "wt" if any(r["wt"] is not None and r["wt"] % 1 for r in rows) else "t"
+    has_inj = any(r["inj"] for r in rows)
+    acc, fuel = {}, {}
+    for seg in _split(rows, lambda r: r["rpm"] > 1800 and (r["inj"] > 0 if has_inj else True)
+                      and r["lat"] and r["lng"], gap_s=0.35, tkey=tkey):
+        j = 0
+        for i in range(len(seg)):           # fit_burn と同じく 1 行ずつずらした窓
+            while j < len(seg) - 1 and seg[j][tkey] - seg[i][tkey] < win_s - 1e-6:
+                j += 1
+            span = seg[j][tkey] - seg[i][tkey]
+            if span < win_s - 1e-6:
+                break
+            w = seg[i:j + 1]
+            vm = (w[-1]["v"] + w[0]["v"]) / 2
+            mid = w[len(w) // 2]
+            s, _, off = course.nearest(mid["lat"], mid["lng"])
+            if vm >= 6 and off <= 30.0:
+                v = vm / 3.6
+                a = (w[-1]["v"] - w[0]["v"]) / 3.6 / span + G * (crr + course.slope(s)) + k * v * v
+                b = int(vm // bin_kmh) * bin_kmh
+                acc.setdefault(b, []).append(a)
+                if has_inj:
+                    fuel.setdefault(b, []).append(
+                        statistics.fmean(inj_ml(r["inj"]) * r["rpm"] / 120.0 for r in w))
+    bins = sorted(b for b in acc if len(acc[b]) >= min_n)
+    return {
+        "accel_real_kmh": [b + bin_kmh / 2 for b in bins],
+        "accel_real": [round(statistics.median(acc[b]), 3) for b in bins],
+        "fuel_ml_s": [round(statistics.fmean(fuel[b]), 4) if b in fuel else None for b in bins],
+        "n": [len(acc[b]) for b in bins],
+    }
+
+
+def cmd_fit_accel(args) -> int:
+    p = load_params(args.params, args.variant)
+    course = course_from_params(p, args.waypoints)
+    crr = args.crr if args.crr is not None else p["vehicle"]["crr"]
+    k = args.k if args.k is not None else p["vehicle"]["k_aero"]
+    rows = []
+    for path in args.logs:
+        rows += load_log(path)
+    r = fit_accel(rows, course, crr, k)
+    if not r["accel_real"]:
+        print("エンジンが回っている区間が足りません")
+        return 1
+    print("走行抵抗 Crr=%.5f k=%.6f /m で足し戻し" % (crr, k))
+    print("速度帯 km/h | 加速度 m/s2 | 燃料 ml/s | n")
+    for v, a, f, n in zip(r["accel_real_kmh"], r["accel_real"], r["fuel_ml_s"], r["n"]):
+        print("  %4.0f      |  %.3f      | %s    | %d" % (v, a, "%.4f" % f if f is not None else "  -   ", n))
+    print("JSON:")
+    print(json.dumps({"accel_real_kmh": r["accel_real_kmh"], "accel_real": r["accel_real"]}))
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # 走行シミュレーション
 # ---------------------------------------------------------------------------
 
@@ -630,11 +770,16 @@ SKIP_KMH = 2.0      # 目印を通過しても、停止速度までこれ未満�
 HOME_MARGIN_S = 15.0  # 最終周を惰行で終えてよいのは、規定時間までこれだけ残る場合だけ
 
 
-def pace_bump(delay_s: float) -> float:
+PACE_S_PER_KMH = 12.0  # もてぎで、停止速度 +1 km/h のとき 1 周あたり縮む秒数
+
+
+def pace_bump(delay_s: float, s_per_kmh: float = PACE_S_PER_KMH) -> float:
     """周回通過時の遅れ（+ が遅れ）から、次の周の停止速度の上げ幅 km/h を決める。
 
-    停止速度 +1 km/h で 1 周あたり約 12 秒縮むので、遅れは 1 周で取り戻せる。
+    停止速度 +1 km/h で 1 周あたり s_per_kmh 秒（もてぎは約 12 秒）縮むので、遅れは 1 周で取り戻せる。
+    しきい値はもてぎの 12 秒で決めたものを、コースごとの s_per_kmh（course.pace_s_per_kmh）で伸縮する。
     """
+    delay_s *= PACE_S_PER_KMH / s_per_kmh
     if delay_s > 35:
         return 3.0
     if delay_s > 20:
@@ -648,9 +793,9 @@ def pace_bump(delay_s: float) -> float:
 
 def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | None = None,
              zone=None, laps: int | None = None, beta: float | None = None,
-             crr_scale: float = 1.0, k_scale: float = 1.0, fail_restarts: int = 0,
-             pace: list | None = None, switches=(), dt_s: float = 0.1, trace: list | None = None,
-             trace_every: int = 10) -> dict:
+             crr_scale: float = 1.0, k_scale: float = 1.0, fail_restarts: int = 0, fail_dead_s: float | None = None,
+             accel_scale: float = 1.0, pace: list | None = None, switches=(), dt_s: float = 0.1,
+             trace: list | None = None, trace_every: int = 10) -> dict:
     """規定周回を走る。加速は次のどちらかで始め、v_off km/h に達したら止める。
 
     - marks: スタートラインからの距離 m。毎周そこを通過したときに始める（位置同期）
@@ -666,28 +811,49 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
     加速開始位置を替える（周は 1 始まり）。
     course の guard_free_zones_m（[[開始 m, 終了 m], ...]）の中では、v_on を割っても
     guard_free_min_kmh までは保険の加速を待つ（惰行で速度が戻る区間）。最低速度 min_kmh はこの区間を除いて数える。
+
+    鈴鹿のように高低差の大きいコース向けに、次の 3 つを course に書ける（無ければ従来どおり）:
+
+    - v_max_zones_m（[[開始 m, 終了 m, km/h], ...]）: その区間ではブレーキでその速度に抑える。捨てた運動
+      エネルギーは brake_j_per_kg に積む。加速中に上限に届いたらエンジンを止める
+    - coast_only_zones_m（[[開始 m, 終了 m], ...]）: 下りなど加速しない区間。目印でも保険の加速でも
+      始めず、加速中に入ったらエンジンを止める
+    - checkpoints_m（[m, ...]）: 周の途中で通過時刻を記録する位置（戻り値の checkpoints）
+
+    burn に accel_real（実走の加速度。勾配と走行抵抗の分を足し戻した値）と accel_real_kmh があれば、
+    ドラムの加速度と上乗せ率の代わりに使う。accel_scale はその倍率（感度用）。
+    restart の launch_delay_s は、発進でボタンを押してから動き出すまでの遅れ（その間は惰行と同じ）。
+    速度が 3 km/h を割ったら stalled を立てる（登りで止まった。完走できない）。
     """
     veh, burn, rst, c = p["vehicle"], p["burn"], p["restart"], p["course"]
     crr = veh["crr"] * crr_scale
     k = veh["k_aero"] * k_scale
     if beta is None:
-        beta = burn["drum_loss_fraction"]
+        beta = burn.get("drum_loss_fraction", 0.5)
     # ドラム慣性と実車質量が違えば加速度は質量比で変わる
     mratio = burn.get("inertia_kg", 1.0) / veh.get("mass_kg", burn.get("inertia_kg", 1.0))
-    extra = beta * burn["drum_decel"]
-    xs, acc, frate = burn["speed_kmh"], burn["accel_drum"], burn["fuel_ml_s"]
+    xs, frate = burn["speed_kmh"], burn["fuel_ml_s"]
+    if burn.get("accel_real"):
+        ax, ay, extra, mratio = burn["accel_real_kmh"], [a * accel_scale for a in burn["accel_real"]], 0.0, 1.0
+    else:
+        ax, ay, extra = xs, [a * accel_scale for a in burn["accel_drum"]], beta * burn["drum_decel"]
     lap = course.lap_m
     s0, total, goal_on_line = race_span(c, lap, laps)
     ctrl = control_m(c)
     vfin = c.get("finish_min_kmh", 12.0) / 3.6
     free = [tuple(z) for z in c.get("guard_free_zones_m", ())]
     free_min = c.get("guard_free_min_kmh", 12.0)
+    no_burn = [tuple(z) for z in c.get("coast_only_zones_m", ())]
+    cps = sorted(float(x) % lap for x in c.get("checkpoints_m", ()))
+    s_per_kmh = c.get("pace_s_per_kmh", PACE_S_PER_KMH)
 
     def in_free(dist):
-        pos = dist % lap
-        return any(a <= pos <= b for a, b in free)
-    # 失敗させる再始動（発進を除く通し番号）。序盤・中盤・終盤に散らす
-    fail_at = {2 + 7 * i for i in range(fail_restarts)}
+        return in_zones(dist, free, lap)
+    # 失敗させる再始動（発進を除く通し番号）。序盤・中盤・終盤に散らす（もてぎの 1 周 3 回・7 周・3 回失敗で 7 回おき）
+    n_laps = laps if laps is not None else c["laps"]
+    every = max(len(marks) or 3, 1) * n_laps // max(fail_restarts, 1)
+    fail_at = {2 + every * i for i in range(fail_restarts)}
+    fail_s = rst["fail_dead_s"] if fail_dead_s is None else fail_dead_s
     marks = sorted(m % lap for m in marks)
     # 発進位置より手前の目印は 1 周目には来ない
     mi, mlap = bisect.bisect_right(marks, s0), 0
@@ -699,15 +865,21 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
     s = s0
     fuel = rst["fuel_ml"]
     state, dead, burns, restarts, burn_time = "burn", 0.0, 1, 0, 0.0
+    if rst.get("launch_delay_s"):
+        state, dead = "crank", rst["launch_delay_s"]
     lag_left = None
-    home = launched = False
-    crossings, starts = [], [(1, s0, 0.0)]
-    vmin = float("inf")
+    home = launched = stalled = False
+    crossings, starts, checkpoints = [], [(1, s0, 0.0)], []
+    ci = bisect.bisect_right(cps, s0 % lap)
+    clap = int(s0 // lap)
+    vmin, vmax = float("inf"), 0.0
+    brake = 0.0
     bump = 0.0
     step = 0
     while s < total:
         res = G * (crr + course.slope(s)) + k * v * v
         kmh = v * 3.6
+        cap = course.v_cap(s)
         v_cut = v_off + bump
         hit = False
         while marks and s >= mlap * lap + marks[mi]:
@@ -715,11 +887,18 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
             mi += 1
             if mi == len(marks):
                 mi, mlap = 0, mlap + 1
+        while cps and s >= clap * lap + cps[ci]:
+            checkpoints.append((len(crossings) + 1, cps[ci], t))
+            ci += 1
+            if ci == len(cps):
+                ci, clap = 0, clap + 1
         if state == "burn":
-            a = (interp(kmh, xs, acc) + extra) * mratio - res
+            a = (interp(kmh, ax, ay) + extra) * mratio - res
             fuel += interp(kmh, xs, frate) * dt_s
             burn_time += dt_s
-            if kmh >= v_cut:
+            if launched and no_burn and in_zones(s, no_burn, lap):
+                state, lag_left = "coast", None   # 下りに入ったら止める（止める合図は区間の手前で出す想定）
+            elif kmh >= min(v_cut, cap * 3.6 - 0.5):
                 # 停止の合図から実際にエンジンが止まるまでの遅れ（cut_lag_s）は燃やし続ける
                 lag_left = burn.get("cut_lag_s", 0.0) if lag_left is None else lag_left
                 lag_left -= dt_s
@@ -738,6 +917,8 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
                     want = not (zone and zone[0] <= pos <= zone[1] and kmh > v_on - 4)
                     if want and in_free(s) and kmh > free_min:
                         want = False        # 惰行で速度が戻る区間では、保険の加速を待つ
+                if want and no_burn and in_zones(s, no_burn, lap) and kmh > free_min:
+                    want = False            # 下りでは加速しない（速度は惰行で戻る）
                 if want:
                     tc = _coast_home_s(course, s, v, crr, k, total, vfin) if total - s < 1500 else None
                     if tc is not None and t + tc <= c["limit_s"] - HOME_MARGIN_S:
@@ -746,17 +927,23 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
                         restarts += 1
                         burns += 1
                         fuel += rst["fuel_ml"]
-                        dead = rst["delay_s"] + (rst["fail_dead_s"] if restarts in fail_at else 0.0)
+                        dead = rst["delay_s"] + (fail_s if restarts in fail_at else 0.0)
                         state = "crank"
                         starts.append((len(crossings) + 1, s % lap, kmh))
         if launched and not in_free(s):
             vmin = min(vmin, kmh)
+        vmax = max(vmax, kmh)
+        if launched and kmh < 3.0:
+            stalled = True
         v = max(v + a * dt_s, 0.3)
+        if v > cap:
+            brake += (v * v - cap * cap) / 2
+            v = cap
         s2 = s + v * dt_s
         if (s2 - ctrl) // lap > (s - ctrl) // lap:
             crossings.append((t + dt_s, fuel, burns))
             if pace is not None and len(crossings) <= len(pace):
-                bump = pace_bump(t + dt_s - pace[len(crossings) - 1])
+                bump = pace_bump(t + dt_s - pace[len(crossings) - 1], s_per_kmh)
             while switches and switches[0][0] <= len(crossings) + 1:
                 _, v_off, new_marks = switches.pop(0)
                 # 通過した位置より先の目印から使う（ID 1 の通過なら次の周の先頭から）
@@ -773,7 +960,8 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
     if not goal_on_line:
         crossings.append((t, fuel, burns))     # 最後の要素は常にゴール
     return {"time_s": t, "fuel_ml": fuel, "burns": burns, "burn_time_s": burn_time,
-            "crossings": crossings, "starts": starts, "finish_kmh": v * 3.6, "min_kmh": vmin}
+            "crossings": crossings, "starts": starts, "finish_kmh": v * 3.6, "min_kmh": vmin,
+            "max_kmh": vmax, "brake_j_per_kg": brake, "stalled": stalled, "checkpoints": checkpoints}
 
 
 def _coast_home_s(course, s, v, crr, k, total, vfin):
@@ -820,7 +1008,7 @@ def plan_from_params(p: dict) -> dict | None:
         raise ValueError("phases の先頭は from_lap 1 にしてください（%s）" % firsts[0])
     if any(b <= a for a, b in zip(firsts, firsts[1:])) or firsts[-1] > laps:
         raise ValueError("phases の from_lap は昇順で %d 周以内にしてください（%s）" % (laps, firsts))
-    if any(not ph["marks_m"] for ph in phases):
+    if any(not ph["marks_m"] for ph in phases) and p.get("format_version", 0) < 5:
         raise ValueError("phases の marks_m が空です")
     pats = [(ph["from_lap"], float(ph["v_off"]), sorted(float(m) for m in ph["marks_m"])) for ph in phases]
     return {"v_off": pats[0][1], "marks": pats[0][2], "v_on": p["course"].get("guard_kmh", 16.0),
@@ -836,7 +1024,10 @@ def evaluate(p: dict, course: Course, pol: dict, **kw) -> dict:
              time_min_s=min(q["time_s"] for q in runs),
              fuel_ml=statistics.fmean(q["fuel_ml"] for q in runs),
              burns=max(q["burns"] for q in runs),
-             min_kmh=min(q["min_kmh"] for q in runs))
+             min_kmh=min(q["min_kmh"] for q in runs),
+             max_kmh=max(q["max_kmh"] for q in runs),
+             brake_j_per_kg=statistics.fmean(q["brake_j_per_kg"] for q in runs),
+             stalled=any(q["stalled"] for q in runs))
     return r
 
 
@@ -871,12 +1062,16 @@ def steady_lap(p: dict, course: Course, marks, v_off: float, dt_s: float = 0.2):
     return (t3 - t1) / 2, (f3 - f1) / 2, (b3 - b1) / 2, r["min_kmh"]
 
 
-def fit_v_off(p, course, marks, lap_target_s, floor_kmh, lo=26.0, hi=40.0, iters=6):
+def fit_v_off(p, course, marks, lap_target_s, floor_kmh, lo=None, hi=None, iters=6):
     """定常周回が lap_target_s に収まる最小の停止速度。(v_off, 燃料 ml/周) / 成り立たなければ None
 
     停止速度を上げるほど周回は速くなるので二分法で足りる。最低速度が floor_kmh を割る
     （＝本番では保険の加速が入ってしまう）配置と、目印を飛ばしてしまう配置は採らない。
+    探す範囲は course の v_off_range_kmh（既定 26〜40 km/h）。
     """
+    rng = p["course"].get("v_off_range_kmh", (26.0, 40.0))
+    lo = float(rng[0]) if lo is None else lo
+    hi = float(rng[1]) if hi is None else hi
     def ok(v_off):
         t, f, n, vmin = steady_lap(p, course, marks, v_off)
         return (t <= lap_target_s and vmin >= floor_kmh), f, n
@@ -909,14 +1104,19 @@ def _gap_ok(marks, lap, min_gap) -> bool:
 
 
 def _descend_marks(p, course, marks, lap_target_s, floor_kmh, grid, min_gap, sweeps):
-    """marks から座標降下で燃料を減らす。(marks, (v_off, 燃料 ml/周)) / 成り立たなければ (marks, None)"""
+    """marks から座標降下で燃料を減らす。(marks, (v_off, 燃料 ml/周)) / 成り立たなければ (marks, None)
+
+    course の coast_only_zones_m（下りなど加速しない区間）には目印を置かない。
+    """
     lap = course.lap_m
+    no_burn = p["course"].get("coast_only_zones_m", ())
+    cands = [float(x) for x in range(0, int(lap), grid) if not in_zones(x, no_burn, lap)]
     best = fit_v_off(p, course, marks, lap_target_s, floor_kmh)
     for _ in range(sweeps):
         improved = False
         for i in range(len(marks)):
-            for cand in range(0, int(lap), grid):
-                trial = sorted(marks[:i] + [float(cand)] + marks[i + 1:])
+            for cand in cands:
+                trial = sorted(marks[:i] + [cand] + marks[i + 1:])
                 if trial == marks or not _gap_ok(trial, lap, min_gap):
                     continue
                 r = fit_v_off(p, course, trial, lap_target_s, floor_kmh)
@@ -934,27 +1134,38 @@ def place_marks(p, course, n, lap_target_s, floor_kmh, grid=100, min_gap=200, sw
     燃料が最小のものを採る。
     """
     lap = course.lap_m
+    no_burn = p["course"].get("coast_only_zones_m", ())
     found = None
     for k in range(starts):
         shift = k * lap / n / starts
         marks = sorted(float(int((i * lap / n + shift + 100) // grid * grid)) for i in range(n))
         if len(set(marks)) < n:
             continue
+        if no_burn:
+            # 下りに落ちた初期位置は、その先の加速してよい最初の位置へ送る
+            marks = sorted({next(float(x) % lap for x in range(int(m), int(m + lap), grid)
+                                 if not in_zones(x, no_burn, lap)) for m in marks})
+            if len(marks) < n:
+                continue
         marks, best = _descend_marks(p, course, marks, lap_target_s, floor_kmh, grid, min_gap, sweeps)
         if best is not None and (found is None or best[1] < found[1][1] - 1e-4):
             found = (marks, best)
     return (found[0], found[1][0]) if found is not None else None
 
 
-def _marks_text(marks, v_off: float) -> str:
+def _marks_text(marks, v_off: float, v_on: float | None = None) -> str:
+    if not marks:
+        return "%.1f km/h まで落ちたら開始 → %.1f km/h で停止" % (v_on, v_off)
     return "位置 [%s] m で開始 → %.1f km/h で停止" % (", ".join("%.0f" % m for m in marks), v_off)
 
 
 def _pol_text(pol: dict) -> str:
-    if pol.get("marks"):
-        return " ／ ".join([_marks_text(pol["marks"], pol["v_off"])]
-                          + ["%d 周目から %s" % (lap, _marks_text(ms, v))
+    if pol.get("marks") or pol.get("switches"):
+        return " ／ ".join([_marks_text(pol.get("marks"), pol["v_off"], pol.get("v_on"))]
+                          + ["%d 周目から %s" % (lap, _marks_text(ms, v, pol.get("v_on")))
                              for lap, v, ms in pol.get("switches", ())])
+    if not pol.get("zone") or pol["zone"][1] <= pol["zone"][0]:
+        return "ON %.0f / OFF %.0f km/h" % (pol["v_on"], pol["v_off"])
     return "ON %.0f / OFF %.0f km/h  禁止 %d-%d m" % (
         pol["v_on"], pol["v_off"], pol["zone"][0], pol["zone"][1])
 
@@ -968,9 +1179,18 @@ def _span_text(c: dict, course: Course) -> str:
 
 
 def _line(r: dict, total_m: float) -> str:
-    return ("%s  %s〜%s (平均 %.2f km/h 以上)  燃料 %.2f ml  加速 %d 回"
+    return ("%s  %s〜%s (平均 %.2f km/h 以上)  燃料 %.2f ml  加速 %d 回%s"
             % (_pol_text(r["pol"]), mmss(r["time_min_s"]), mmss(r["time_s"]),
-               total_m / r["time_s"] * 3.6, r["fuel_ml"], r["burns"]))
+               total_m / r["time_s"] * 3.6, r["fuel_ml"], r["burns"],
+               "  【登りで失速】" if r.get("stalled") else ""))
+
+
+def _with_caps(p: dict, dv: float):
+    """速度上限（v_max_zones_m）を dv km/h ずらしたパラメータとコース。"""
+    q = json.loads(json.dumps({k: v for k, v in p.items() if k != "_dir"}))
+    q["_dir"] = p["_dir"]
+    q["course"]["v_max_zones_m"] = [[a, b, kmh + dv] for a, b, kmh in p["course"].get("v_max_zones_m", ())]
+    return q, course_from_params(q)
 
 
 def _shift_v_off(pol: dict, dv: float) -> dict:
@@ -993,35 +1213,69 @@ def _report(p, course, rec, args, limit, what: str = "推奨パターン") -> fl
         prev = tl
     print("  合計 %s  燃料 %.2f ml  ゴール通過 %.1f km/h  発進後の最低速度 %.1f km/h"
           % (mmss(r["time_s"]), r["fuel_ml"], r["finish_kmh"], r["min_kmh"]))
+    v5 = p.get("format_version", 0) >= 5
+    if v5:
+        print("  最高速度 %.1f km/h  ブレーキで捨てた運動エネルギー %.0f J/kg（1 周あたり %.0f J/kg）%s"
+              % (r["max_kmh"], r["brake_j_per_kg"], r["brake_j_per_kg"] / p["course"]["laps"],
+                 "  【登りで失速】" if r["stalled"] else ""))
+    if r["checkpoints"]:
+        cps = sorted({cp for _, cp, _ in r["checkpoints"]})
+        print("\n周の途中の通過（累積時間。周はコントロールラインで数える）:")
+        print("  周  " + "  ".join("%6.0f m" % cp for cp in cps) + "   コントロールライン")
+        for n in range(1, len(cum) + 1):
+            row = {cp: tc for lp, cp, tc in r["checkpoints"] if lp == n}
+            print("  %d   %s   %s" % (n, "  ".join("%8s" % (mmss(row[cp]) if cp in row else "-") for cp in cps),
+                                    mmss(cum[n - 1])))
 
     print("\n停止速度が系統的にずれたときの合計時間（補正なし）:")
+    shifted = {}
     for dv in (-1.0, -0.5, 0.5, 1.0):
         q = evaluate(p, course, _shift_v_off(pol, dv))
+        shifted[dv] = q
         print("  %+.1f km/h → %s (%+.0f s)  燃料 %.2f ml"
               % (dv, mmss(q["time_s"]), q["time_s"] - rec["time_s"], q["fuel_ml"]))
+    if v5:
+        per = (shifted[-1.0]["time_s"] - shifted[1.0]["time_s"]) / 2 / p["course"]["laps"]
+        print("  停止速度 +1 km/h で 1 周あたり %.1f 秒縮む（course.pace_s_per_kmh の値。今は %.1f）"
+              % (per, p["course"].get("pace_s_per_kmh", PACE_S_PER_KMH)))
 
     print("\n感度（補正なし → 周回通過タイムで停止速度を補正。時間は 3 通りの最長）:")
     slow = {"crr_scale": 1.2, "k_scale": 1.2}
-    cases = [("基準", {}),
-             ("ドラム損失 上乗せ 0", {"beta": 0.0}),
-             ("ドラム損失 上乗せ 1", {"beta": 1.0}),
-             ("走行抵抗 +20%", slow),
-             ("走行抵抗 -20%", {"crr_scale": 0.8, "k_scale": 0.8}),
-             ("再始動失敗 %d 回" % args.fails, {"fail_restarts": args.fails}),
-             ("抵抗 +20%% かつ失敗 %d 回" % args.fails, dict(slow, fail_restarts=args.fails)),
-             ("抵抗 +20% かつ上乗せ 0", dict(slow, beta=0.0)),
-             ("停止速度 -1 km/h", {"_dv": -1.0}),
-             ("停止速度 -1 km/h かつ抵抗 +20%", dict(slow, _dv=-1.0))]
+    if p["burn"].get("accel_real"):
+        weak = {"accel_scale": 0.85}
+        cases = [("基準", {}),
+                 ("加速度 -15%", weak),
+                 ("加速度 +15%", {"accel_scale": 1.15})]
+    else:
+        weak = {"beta": 0.0}
+        cases = [("基準", {}),
+                 ("ドラム損失 上乗せ 0", weak),
+                 ("ドラム損失 上乗せ 1", {"beta": 1.0})]
+    cases += [("走行抵抗 +20%", slow),
+              ("走行抵抗 -20%", {"crr_scale": 0.8, "k_scale": 0.8}),
+              ("再始動失敗 %d 回" % args.fails, {"fail_restarts": args.fails}),
+              ("抵抗 +20%% かつ失敗 %d 回" % args.fails, dict(slow, fail_restarts=args.fails)),
+              ("抵抗 +20%% かつ%s" % ("加速度 -15%" if "accel_scale" in weak else "上乗せ 0"), dict(slow, **weak)),
+              ("停止速度 -1 km/h", {"_dv": -1.0}),
+              ("停止速度 -1 km/h かつ抵抗 +20%", dict(slow, _dv=-1.0))]
+    if v5:
+        cases += [("再始動の連続失敗 1 回（12 秒）", {"fail_restarts": 1, "fail_dead_s": 12.0}),
+                  ("加速度 -15% かつ連続失敗（12 秒）", dict(weak, fail_restarts=1, fail_dead_s=12.0))]
+        if p["course"].get("v_max_zones_m"):
+            cases += [("速度上限 -10 km/h", {"_caps": -10.0}), ("速度上限 +10 km/h", {"_caps": 10.0})]
     worst = 0.0
     for name, kw in cases:
         kw = dict(kw)
         q_pol = _shift_v_off(pol, kw.pop("_dv", 0.0))
-        o = evaluate(p, course, q_pol, **kw)
-        q = evaluate(p, course, q_pol, pace=cum, **kw)
+        dcap = kw.pop("_caps", None)
+        qp, qc = _with_caps(p, dcap) if dcap is not None else (p, course)
+        o = evaluate(qp, qc, q_pol, **kw)
+        q = evaluate(qp, qc, q_pol, pace=cum, **kw)
         worst = max(worst, q["time_s"])
-        print("  %-26s %s → %s  規定まで %+4.0f s  燃料 %5.2f ml  加速 %d 回  最低 %.1f km/h"
+        extra = ("  最高 %.0f km/h%s" % (q["max_kmh"], "  【失速】" if q["stalled"] else "")) if v5 else ""
+        print("  %-26s %s → %s  規定まで %+4.0f s  燃料 %5.2f ml  加速 %d 回  最低 %.1f km/h%s"
               % (name, mmss(o["time_s"]), mmss(q["time_s"]), limit - q["time_s"],
-                 q["fuel_ml"], q["burns"], q["min_kmh"]))
+                 q["fuel_ml"], q["burns"], q["min_kmh"], extra))
     if args.trace:
         with open(args.trace, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
@@ -1033,7 +1287,7 @@ def _report(p, course, rec, args, limit, what: str = "推奨パターン") -> fl
 
 def cmd_plan(args) -> int:
     """パラメータの phases に書いたプラン（周ごとのパターン）を評価する。探索はしない。"""
-    p = load_params(args.params)
+    p = load_params(args.params, args.variant)
     course = course_from_params(p, args.waypoints)
     c = p["course"]
     try:
@@ -1056,7 +1310,7 @@ def cmd_plan(args) -> int:
 
 
 def cmd_optimize(args) -> int:
-    p = load_params(args.params)
+    p = load_params(args.params, args.variant)
     course = course_from_params(p, args.waypoints)
     c = p["course"]
     target = parse_mmss(args.target) if args.target else p["target_s"]
@@ -1098,12 +1352,12 @@ def cmd_optimize(args) -> int:
 
 def cmd_speed_rule(args) -> int:
     """位置を使わず速度だけで判断する規則の格子探索（位置同期との比較用）。"""
-    p = load_params(args.params)
+    p = load_params(args.params, args.variant)
     course = course_from_params(p, args.waypoints)
     c = p["course"]
     target = parse_mmss(args.target) if args.target else p["target_s"]
     results = []
-    for zone in (tuple(z) for z in c["no_burn_zones_m"]):
+    for zone in [tuple(z) for z in c.get("no_burn_zones_m", ())] or [None]:
         for v_on in range(args.on_min, args.on_max + 1):
             for v_off in range(args.off_min, args.off_max + 1):
                 if v_off - v_on >= 6:
@@ -1126,8 +1380,11 @@ def cmd_speed_rule(args) -> int:
 # replay: 惰行モデルを実走ログで検証
 # ---------------------------------------------------------------------------
 
-def replay(rows: list, course: Course, crr: float, k: float, min_s: float = 20.0) -> list:
-    """各惰行区間を実測の初速から同じ距離だけ惰行させ、所要時間と終速を実測と比べる。"""
+def replay(rows: list, course: Course, crr: float, k: float, min_s: float = 20.0, exclude=()) -> list:
+    """各惰行区間を実測の初速から同じ距離だけ惰行させ、所要時間と終速を実測と比べる。
+
+    exclude（ブレーキを踏みうる区間）にかかる惰行は使わない。
+    """
     out = []
     for seg in _split(rows, lambda r: r["rpm"] == 0 and r["v"] >= 14.0, gap_s=5.0):
         seg = [r for r in seg if r["t"] - seg[0]["t"] >= 3.0]
@@ -1138,6 +1395,8 @@ def replay(rows: list, course: Course, crr: float, k: float, min_s: float = 20.0
         if off > 30.0:
             continue
         dist = b["dist"] - a["dist"]
+        if _touches(course, s0, s0 + dist, exclude):
+            continue
         s, v, t = s0, a["v"] / 3.6, 0.0
         while s - s0 < dist and v > 0.5:
             s, v = coast_step(course, s, v, crr, k, 0.1)
@@ -1148,13 +1407,13 @@ def replay(rows: list, course: Course, crr: float, k: float, min_s: float = 20.0
 
 
 def cmd_replay(args) -> int:
-    p = load_params(args.params)
+    p = load_params(args.params, args.variant)
     course = course_from_params(p, args.waypoints)
     crr = args.crr if args.crr is not None else p["vehicle"]["crr"]
     k = args.k if args.k is not None else p["vehicle"]["k_aero"]
     rc = 0
     for path in args.logs:
-        res = replay(load_log(path), course, crr, k)
+        res = replay(load_log(path), course, crr, k, exclude=p["course"].get("coast_exclude_zones_m", ()))
         if not res:
             print("%s: 惰行区間なし" % os.path.basename(path))
             rc = 1
@@ -1200,13 +1459,18 @@ _BURN_COLOR = "#dc2626"
 
 
 def course_svg(course: Course, marks, spans, v_off: float, width: int = 900,
-               start_finish: tuple | None = None, control: float = 0.0, guard_kmh: float | None = None) -> str:
+               start_finish: tuple | None = None, control: float = 0.0, guard_kmh: float | None = None,
+               name: str = "もてぎオーバル", arrows=(130.0, 1250.0), checkpoints=(), list_xy=None) -> str:
     """北を上にしたコース図。勾配で色分けし、加速開始位置と加速区間を重ねる。
 
     start_finish = (発進位置 m, ゴール位置 m) を渡すと、内側のレーンにある発進・ゴールの位置を描く。
     control にコントロールラインの位置 m を渡すと、ID 1（0 m）とは別に描く。
     spans に保険の加速（目印から離れた加速）が含まれるときは、guard_kmh をその合図の速度として書く。
+    回る向きはウェイポイントから判定し（course.clockwise）、ラベルはコースの外側に置く。
+    arrows は進行方向の矢印を置く位置 m、checkpoints は周の途中の通過時刻を見る位置 m。
+    list_xy = (x, y) を渡すと、加速開始位置の説明をコースの横ではなくその位置に一覧で並べる。
     """
+    side = -1.0 if course.clockwise else 1.0   # 外側が進行方向の右手なら +1
     pad_x, top, bottom = 200, 80, 130
     lat0, lng0 = min(course.lat), min(course.lng)
     mx = [(g - lng0) * 111320.0 * course._coslat for g in course.lng]
@@ -1222,7 +1486,8 @@ def course_svg(course: Course, marks, spans, v_off: float, width: int = 900,
         return px(*course.latlng_at(s))
 
     def outward(s, dist):
-        # 左回りなので進行方向の右手がコースの外側（画面座標は y が下向き）
+        # 左回りなら進行方向の右手、右回りなら左手がコースの外側（画面座標は y が下向き）
+        dist *= side
         (x0, y0), (x1, y1), (x, y) = at(s - 6), at(s + 6), at(s)
         d = math.hypot(x1 - x0, y1 - y0)
         return x - (y1 - y0) / d * dist, y + (x1 - x0) / d * dist
@@ -1240,8 +1505,50 @@ def course_svg(course: Course, marks, spans, v_off: float, width: int = 900,
             anchor = "end"
         return x, y, anchor
 
-    def label(s, dist, text, size=15, weight="normal", fill="#111827", flip=True):
-        x, y, anchor = place(s, dist, text, size, flip)
+    placed = []                              # 置いたラベルの外枠（重なりを避ける）
+
+    def box(x, y, anchor, text, size, lines=1):
+        w = sum(size if ord(ch) > 255 else size * 0.65 for ch in text)
+        x0 = x if anchor == "start" else x - w if anchor == "end" else x - w / 2
+        return (x0, y - size * 0.7, x0 + w, y + size * 0.7 + 19 * (lines - 1))
+
+    def clashes(b):
+        """重なる数（図の外にはみ出すときは大きな数）。"""
+        if b[0] < 6 or b[2] > width - 6 or b[1] < 50:
+            return 1000
+        return sum(1 for q in placed if not (b[2] < q[0] or b[0] > q[2] or b[3] < q[1] or b[1] > q[3]))
+
+    def spot(s, dist, text, size, flip, lines=1):
+        """重ならない位置。指定の側 → 反対側 → 離す → 上下にずらす、の順に試し、
+        どれも重なるときは重なりが最も少ない位置にする。"""
+        sign = 1 if dist > 0 else -1
+        dists = [d * sign for d in (abs(dist), abs(dist) + 26, abs(dist) + 56)]
+        tries = [(d, 0.0) for dd in dists for d in (dd, -dd)]
+        tries += [(d, k * dy) for k in range(1, 9) for dy in (size * 1.4, -size * 1.4)
+                  for d in (dists[0], -dists[0])]
+        best = None
+        for d, dy in tries:
+            x, y, anchor = place(s, d, text, size, flip)
+            b = box(x, y + dy, anchor, text, size, lines)
+            n = clashes(b)
+            if best is None or n < best[0]:
+                best = (n, b, (x, y + dy, anchor))
+            if n == 0:
+                break
+        placed.append(best[1])
+        return best[2]
+
+    # コースの線と加速区間（丸印を含む）にもラベルを重ねない
+    for s_m in range(0, int(course.lap_m), 10):
+        x, y = at(s_m)
+        placed.append((x - 4, y - 4, x + 4, y + 4))
+    for s0, s1, _ in spans:
+        for s_m in range(int(s0), int(s1) + 1, 5):
+            x, y = at(s_m)
+            placed.append((x - 11, y - 11, x + 11, y + 11))
+
+    def label(s, dist, text, size=15, weight="normal", fill="#111827", flip=True, lines=1, at_xy=None):
+        x, y, anchor = at_xy or spot(s, dist, text, size, flip, lines)
         return ('<text x="%.1f" y="%.1f" text-anchor="%s" dominant-baseline="middle" font-size="%d" '
                 'font-weight="%s" fill="%s" stroke="#ffffff" stroke-width="4" paint-order="stroke">%s</text>'
                 % (x, y, anchor, size, weight, fill, text))
@@ -1262,7 +1569,7 @@ def course_svg(course: Course, marks, spans, v_off: float, width: int = 900,
            'font-family="sans-serif">' % (width, height, width, height),
            '<rect width="100%" height="100%" fill="#ffffff"/>',
            '<text x="%d" y="34" text-anchor="middle" font-size="20" font-weight="bold" fill="#111827">'
-           'もてぎオーバル 加速開始位置（左回り・北が上）</text>' % (width / 2)]
+           '%s 加速開始位置（%s・北が上）</text>' % (width / 2, name, "右回り" if course.clockwise else "左回り")]
 
     # 勾配で色分けしたコース
     runs, start, cls = [], 0, slope_class(0)
@@ -1279,7 +1586,7 @@ def course_svg(course: Course, marks, spans, v_off: float, width: int = 900,
         out.append(label((s0 + s1) / 2, dist, text, size=14, fill=color[c], weight="bold"))
 
     # 進行方向
-    for s_m in (130.0, 1250.0):
+    for s_m in arrows:
         (x0, y0), (x1, y1) = at(s_m), at(s_m + 12)
         ang = math.degrees(math.atan2(y1 - y0, x1 - x0))
         out.append('<polygon points="9,0 -7,-7 -7,7" fill="#111827" transform="translate(%.1f,%.1f) rotate(%.1f)"/>'
@@ -1301,6 +1608,11 @@ def course_svg(course: Course, marks, spans, v_off: float, width: int = 900,
             out.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="#111827" stroke-width="3" '
                        'stroke-dasharray="5 3"/>' % (ax, ay, bx, by))
             out.append(label(pos, -46, "%s（%.0f m）" % (text, pos), size=13, flip=False))
+    # 周の途中の通過時刻を見る位置
+    for cp in checkpoints:
+        (ax, ay), (bx, by) = outward(cp, -14), outward(cp, 14)
+        out.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="#7c3aed" stroke-width="3"/>' % (ax, ay, bx, by))
+        out.append(label(cp, -30, "通過 %.0f m" % cp, size=13, fill="#7c3aed", flip=False))
     # コントロールライン（周回の通過）
     if control:
         (ax, ay), (bx, by) = outward(control, -40), outward(control, 16)
@@ -1334,9 +1646,13 @@ def course_svg(course: Course, marks, spans, v_off: float, width: int = 900,
             text = "%d: %.0f m（ID %d）" % (n, m, course.nearest_id(m))
         else:
             text = "%d: 約 %.0f m（%.0f km/h まで落ちたら）" % (n, round(m, -1), guard_kmh or span[2])
-        out.append(label(m, 34, text, weight="bold"))
+        if list_xy:
+            # 番号だけをコース上に置き、説明は一覧にまとめる（細長いコースでラベルが重なるため）
+            lx, ly, anchor = list_xy[0], list_xy[1] + (n - 1) * 46, "start"
+        else:
+            lx, ly, anchor = spot(m, 34, text, 15, True, lines=2 if span else 1)
+        out.append(label(m, 34, text, weight="bold", at_xy=(lx, ly, anchor)))
         if span:
-            lx, ly, anchor = place(m, 34, text, 15)
             out.append('<text x="%.1f" y="%.1f" text-anchor="%s" dominant-baseline="middle" font-size="13" '
                        'fill="#374151" stroke="#ffffff" stroke-width="4" paint-order="stroke">'
                        '約 %.0f → %.1f km/h、%.0f m</text>' % (lx, ly + 19, anchor, span[2], v_off, span[1] - span[0]))
@@ -1350,7 +1666,7 @@ def course_svg(course: Course, marks, spans, v_off: float, width: int = 900,
     for x in (bx0, bx0 + 200 * scale):
         out.append('<line x1="%.1f" y1="%d" x2="%.1f" y2="%d" stroke="#111827" stroke-width="3"/>' % (x, by0 - 6, x, by0 + 6))
     out.append('<text x="%.1f" y="%d" text-anchor="middle" font-size="13" fill="#111827">200 m</text>' % (bx0 + 100 * scale, by0 - 10))
-    lx, ly = width - 250, height - 96
+    lx, ly = width - 290, height - 96
     items = [(c, t, 9) for _, c, t in _SLOPE_STYLE] + [(_BURN_COLOR, "加速区間（丸印が開始位置）", 9)]
     for i, (c, t, w) in enumerate(items):
         y = ly + i * 22
@@ -1361,15 +1677,18 @@ def course_svg(course: Course, marks, spans, v_off: float, width: int = 900,
 
 
 def cmd_map(args) -> int:
-    p = load_params(args.params)
+    p = load_params(args.params, args.variant)
     course = course_from_params(p, args.waypoints)
     spans = burn_spans(p, course, args.marks, args.v_off, v_on=p["course"].get("guard_kmh", 16.0))
     s0, total, on_line = race_span(p["course"], course.lap_m)
     goal = total % course.lap_m
     sf = None if not s0 and not goal else (s0, goal or None)
     with open(args.out, "w", encoding="utf-8") as f:
+        c = p["course"]
         f.write(course_svg(course, args.marks, spans, args.v_off, start_finish=sf,
-                           control=control_m(p["course"]), guard_kmh=p["course"].get("guard_kmh", 16.0)))
+                           control=control_m(c), guard_kmh=c.get("guard_kmh", 16.0),
+                           name=c.get("name", "もてぎオーバル"), arrows=c.get("map_arrows_m", (130.0, 1250.0)),
+                           checkpoints=c.get("checkpoints_m", ()), list_xy=c.get("map_list_xy")))
     print("コース図: %s" % args.out)
     print("位置 m | ID | 緯度, 経度 | 加速区間 m（3 周目、保険の加速を含む）")
     rows = [(m, next((sp for sp in spans if abs(sp[0] - m) < 60), None)) for m in sorted(args.marks)]
@@ -1386,9 +1705,10 @@ def cmd_map(args) -> int:
 # ---------------------------------------------------------------------------
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="もてぎオーバル 加速・惰行シミュレータ")
+    ap = argparse.ArgumentParser(description="エコマイレッジ 加速・惰行シミュレータ（もてぎオーバル・鈴鹿東コース）")
     ap.add_argument("--params", default=DEFAULT_PARAMS, help="パラメータ JSON")
     ap.add_argument("--waypoints", help="ウェイポイント CSV（既定は JSON の指定）")
+    ap.add_argument("--variant", help="パラメータ JSON の variants のうち使うもの（例: rain）")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("fit-coast", help="実走ログの惰行から Crr と k を推定")
@@ -1412,6 +1732,12 @@ def main(argv=None) -> int:
     s.add_argument("log")
     s.add_argument("--inertia-kg", type=float, default=105.0, help="ドラムの等価慣性質量")
     s.set_defaults(func=cmd_fit_burn)
+
+    s = sub.add_parser("fit-accel", help="実走ログから加速度（勾配と走行抵抗を足し戻した値）を集計")
+    s.add_argument("logs", nargs="+")
+    s.add_argument("--crr", type=float, help="足し戻す走行抵抗（既定は JSON の vehicle）")
+    s.add_argument("--k", type=float)
+    s.set_defaults(func=cmd_fit_accel)
 
     s = sub.add_parser("optimize", help="位置同期の加速・惰行パターンを探索")
     s.add_argument("--target", help="目標時間 MM:SS（既定は JSON の target_s）")
@@ -1440,7 +1766,8 @@ def main(argv=None) -> int:
     s.set_defaults(func=cmd_speed_rule)
 
     s = sub.add_parser("map", help="加速開始位置のコース図（SVG）を出力")
-    s.add_argument("--marks", type=float, nargs="+", required=True, help="加速開始位置 m")
+    s.add_argument("--marks", type=float, nargs="*", default=[],
+                   help="加速開始位置 m（省略すると、保険の加速の速度まで落ちたところだけで始める）")
     s.add_argument("--v-off", type=float, required=True, help="停止速度 km/h")
     s.add_argument("--out", required=True, help="出力先 .svg")
     s.set_defaults(func=cmd_map)

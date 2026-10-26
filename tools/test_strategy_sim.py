@@ -554,6 +554,219 @@ class TestSimulate(unittest.TestCase):
             self.assertEqual(sum(1 for n, _, _ in r["starts"] if n == lap), 3, lap)
 
 
+def write_cw_course(dirname: str, amp: float) -> str:
+    """write_course と同じ円を右回り（時計回り）にたどるコース。"""
+    path = os.path.join(dirname, "wp_cw_%g.csv" % amp)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("ID,lat,lng,alt,distance\n")
+        for i in range(N_WP):
+            s = i * LAP / N_WP
+            lat, lng = circle_latlng(-s)
+            f.write("%d,%.7f,%.7f,%.3f,%.1f\n"
+                    % (i + 1, lat, lng, 100 + amp * math.sin(2 * math.pi * s / LAP), s))
+    return path
+
+
+def hilly_params(dirname: str, amp: float = 12.0, **course) -> dict:
+    """高低差の大きい右回りの合成コース（鈴鹿向けの機能を確かめる。0〜600 m が下りの底へ向かう坂）。
+
+    標高は 100 + amp*sin(2πs/LAP) なので、600 m（1/4 周）が最高点、1,800 m が最低点。
+    """
+    p = pre_practice_params()
+    p["format_version"] = 5
+    p["_dir"] = dirname
+    p["course"] = dict({"waypoints": os.path.basename(write_cw_course(dirname, amp)), "laps": 4,
+                        "total_m": 4 * LAP, "limit_s": 4 * LAP / (25 / 3.6), "guard_kmh": 18.0,
+                        "finish_min_kmh": 12.0}, **course)
+    p["burn"] = dict(p["burn"], accel_real_kmh=[10, 30, 50], accel_real=[1.0, 0.7, 0.4])
+    return p
+
+
+class TestHillyCourse(unittest.TestCase):
+    """鈴鹿のように高低差の大きいコースのための機能（format_version 5）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.p = hilly_params(cls.tmp.name)
+        cls.course = ss.course_from_params(cls.p)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def run_sim(self, p=None, v_off=30.0, **kw):
+        p = p or self.p
+        return ss.simulate(p, ss.course_from_params(p), v_off, v_on=p["course"]["guard_kmh"], **kw)
+
+    def test_direction(self):
+        self.assertTrue(self.course.clockwise)
+        ccw = ss.Course(write_course(self.tmp.name, 1.5), LAP)
+        self.assertFalse(ccw.clockwise)
+
+    def test_lap_length_is_separate_from_official_distance(self):
+        c = dict(self.p["course"], lap_m=2500.0)
+        self.assertEqual(ss.lap_length(c), 2500.0)
+        self.assertEqual(ss.lap_length(self.p["course"]), LAP)
+        longer = ss.course_from_params(dict(self.p, course=c))
+        self.assertAlmostEqual(longer.lap_m, 2500.0)
+        r = self.run_sim(dict(self.p, course=c))
+        self.assertGreater(r["time_s"], self.run_sim()["time_s"])
+
+    def test_in_zones_wraps_over_id1(self):
+        self.assertTrue(ss.in_zones(2350, [(2300, 100)], LAP))
+        self.assertTrue(ss.in_zones(50, [(2300, 100)], LAP))
+        self.assertFalse(ss.in_zones(150, [(2300, 100)], LAP))
+
+    def test_speed_cap_brakes_and_counts_the_loss(self):
+        free = self.run_sim()
+        capped_p = dict(self.p, course=dict(self.p["course"], v_max_zones_m=[[0, LAP, 32.0]]))
+        capped = self.run_sim(capped_p)
+        self.assertGreater(free["max_kmh"], 40.0)
+        self.assertLessEqual(capped["max_kmh"], 32.0 + 1e-6)
+        self.assertEqual(free["brake_j_per_kg"], 0.0)
+        self.assertGreater(capped["brake_j_per_kg"], 0.0)
+        # 惰行だけの計算（ゴールまで惰行できるかの判定など）にも上限が効く
+        course = ss.course_from_params(capped_p)
+        s, v = 600.0, 30.0 / 3.6
+        while s < 1800.0:
+            s, v = ss.coast_step(course, s, v, 0.0, 0.0, 0.1)
+            self.assertLessEqual(v, 32.0 / 3.6 + 1e-9)
+
+    def test_no_burn_on_the_downhill(self):
+        p = dict(self.p, course=dict(self.p["course"], coast_only_zones_m=[[600, 1800]]))
+        trace = []
+        r = self.run_sim(p, trace=trace, trace_every=1)
+        for _, pos, kmh in r["starts"][1:]:
+            self.assertFalse(600 < pos < 1800, (pos, kmh))
+        burning = [pos for _, _, _, pos, _, state, _ in trace if state == "burn" and trace[0][0] > 0]
+        self.assertFalse(any(605 < pos < 1795 for pos in burning[50:]))
+
+    def test_checkpoints_are_passed_every_lap(self):
+        p = dict(self.p, course=dict(self.p["course"], checkpoints_m=[600, 1800]))
+        r = self.run_sim(p)
+        self.assertEqual([cp for _, cp, _ in r["checkpoints"]], [600.0, 1800.0] * 4)
+        times = [t for _, _, t in r["checkpoints"]]
+        self.assertEqual(times, sorted(times))
+
+    def test_launch_delay_costs_time(self):
+        late = dict(self.p, restart=dict(self.p["restart"], launch_delay_s=3.0))
+        self.assertGreater(self.run_sim(late)["time_s"], self.run_sim()["time_s"] + 1.0)
+
+    def test_real_accel_table_replaces_drum(self):
+        weak = self.run_sim(accel_scale=0.85)
+        base = self.run_sim()
+        self.assertGreater(weak["burn_time_s"], base["burn_time_s"])
+        drum = dict(self.p, burn={k: v for k, v in self.p["burn"].items() if not k.startswith("accel_real")})
+        self.assertNotEqual(self.run_sim(drum)["burn_time_s"], base["burn_time_s"])
+
+    def test_stall_is_flagged_on_a_steep_climb(self):
+        steep = hilly_params(self.tmp.name, amp=60.0)
+        weak = dict(steep, burn=dict(steep["burn"], accel_real=[0.2, 0.15, 0.1]))
+        self.assertFalse(self.run_sim()["stalled"])
+        self.assertTrue(self.run_sim(weak)["stalled"])
+
+    def test_pace_bump_scales_with_the_course(self):
+        self.assertEqual(ss.pace_bump(9), ss.pace_bump(9, 12.0))
+        self.assertEqual(ss.pace_bump(11, 6.0), 2.0)      # 1 km/h で半分しか縮まないコースでは倍の幅
+        self.assertEqual(ss.pace_bump(9, 24.0), 0.0)
+
+    def test_variant_overrides_nested_values(self):
+        path = os.path.join(self.tmp.name, "v.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('{"course": {"laps": 4, "v_max_zones_m": [[0, 10, 70]]}, "vehicle": {"crr": 0.001, "k_aero": 0.0003},'
+                    ' "variants": {"rain": {"_comment": "x", "course": {"v_max_zones_m": [[0, 10, 55]]},'
+                    ' "vehicle": {"crr": 0.003}}}}')
+        dry, rain = ss.load_params(path), ss.load_params(path, "rain")
+        self.assertEqual(dry["course"]["v_max_zones_m"], [[0, 10, 70]])
+        self.assertEqual(rain["course"]["v_max_zones_m"], [[0, 10, 55]])
+        self.assertEqual((rain["vehicle"]["crr"], rain["vehicle"]["k_aero"]), (0.003, 0.0003))
+        self.assertEqual(rain["course"]["laps"], 4)
+        with self.assertRaises(ValueError):
+            ss.load_params(path, "snow")
+
+    def test_speed_only_plan(self):
+        p = dict(self.p, phases=[{"from_lap": 1, "v_off": 30.0, "marks_m": []}])
+        pol = ss.plan_from_params(p)
+        self.assertEqual((pol["marks"], pol["v_on"]), ([], 18.0))
+        r = ss.evaluate(p, self.course, pol)
+        self.assertGreater(r["burns"], 4)
+        self.assertEqual(ss._pol_text(pol), "ON 18 / OFF 30 km/h")
+
+
+class TestFitAccel(unittest.TestCase):
+    def test_adds_back_grade_and_drag(self):
+        crr, k = 0.002, 0.0004
+        with tempfile.TemporaryDirectory() as d:
+            course = ss.Course(write_course(d, 6.0), LAP)
+            rows, t, s, v = [], 0.0, 0.0, 12.0 / 3.6
+            while v < 40.0 / 3.6:                # 正味の加速は「0.8 m/s2 − 勾配 − 走行抵抗」
+                a = 0.8 - (ss.G * (crr + course.slope(s)) + k * v * v)
+                lat, lng = course.latlng_at(s)
+                rows.append({"t": t, "wt": round(t, 1), "v": v * 3.6, "rpm": 3000.0, "inj": 3.0,
+                             "lat": lat, "lng": lng})
+                v += a * 0.1
+                s += v * 0.1
+                t += 0.1
+            r = ss.fit_accel(rows, course, crr, k)
+        self.assertTrue(r["accel_real"])
+        for a in r["accel_real"]:
+            self.assertAlmostEqual(a, 0.8, delta=0.03)
+
+
+class TestSuzuka(unittest.TestCase):
+    """同梱の鈴鹿のパラメータ（suzuka_2027.json）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.path = os.path.join(os.path.dirname(ss.DEFAULT_PARAMS), "suzuka_2027.json")
+        cls.p = ss.load_params(cls.path)
+        cls.course = ss.course_from_params(cls.p)
+
+    def test_matches_regulation(self):
+        c = self.p["course"]
+        self.assertEqual(c["laps"], 8)
+        self.assertAlmostEqual(c["total_m"] / c["laps"], 2202.0)
+        self.assertAlmostEqual(c["total_m"] / c["limit_s"] * 3.6, 25.0, places=3)
+        self.assertAlmostEqual(self.course.lap_m, c["lap_m"])
+        self.assertTrue(self.course.clockwise)
+
+    def test_plan_finishes_without_stalling(self):
+        for variant in (None, "rain"):
+            p = ss.load_params(self.path, variant)
+            r = ss.evaluate(p, ss.course_from_params(p), ss.plan_from_params(p))
+            self.assertFalse(r["stalled"], variant)
+            self.assertLess(r["time_s"], p["course"]["limit_s"] - 300, variant)
+            cap = max(kmh for _, _, kmh in p["course"]["v_max_zones_m"])
+            self.assertLessEqual(r["max_kmh"], cap + 0.5, variant)
+            # 下り（頂上から下りの底まで）では加速を始めない
+            self.assertFalse([pos for _, pos, _ in r["starts"][1:]
+                              if ss.in_zones(pos, p["course"]["coast_only_zones_m"], self.course.lap_m)])
+
+    def test_rain_brakes_on_the_downhill(self):
+        rain = ss.load_params(self.path, "rain")
+        r = ss.evaluate(rain, ss.course_from_params(rain), ss.plan_from_params(rain))
+        self.assertGreater(r["brake_j_per_kg"], 0.0)
+
+    def test_waypoints_match_the_logger(self):
+        logger = os.path.join(os.path.dirname(ss.HERE), "..", "Chibi-T_Furoshiki_Logger", "sd", "suzuka_waypoint.csv")
+        if not os.path.exists(logger):
+            self.skipTest("ロガーのリポジトリが隣に無い")
+        with open(logger, "rb") as a, open(os.path.join(self.p["_dir"], self.p["course"]["waypoints"]), "rb") as b:
+            self.assertEqual(a.read(), b.read())
+
+    def test_svg_lists_the_starts(self):
+        import xml.etree.ElementTree as ET
+        c = self.p["course"]
+        spans = ss.burn_spans(self.p, self.course, [], 29.0, v_on=c["guard_kmh"])
+        svg = ss.course_svg(self.course, [], spans, 29.0, guard_kmh=c["guard_kmh"], name=c["name"],
+                            list_xy=c["map_list_xy"])
+        root = ET.fromstring(svg)
+        texts = ["".join(t.itertext()) for t in root.iter("{http://www.w3.org/2000/svg}text")]
+        self.assertTrue(any("右回り" in t for t in texts))
+        self.assertEqual(sum(1 for t in texts if "km/h まで落ちたら" in t), len(spans))
+
+
 class TestMap(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

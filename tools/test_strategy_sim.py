@@ -778,7 +778,7 @@ class TestSuzuka(unittest.TestCase):
                               if ss.in_zones(pos, p["course"]["coast_only_zones_m"], self.course.lap_m)])
 
     def test_crest_is_crossed_slowly(self):
-        # 頂上の止め時（目標 10 km/h）で、乾いた路面でも雨でも頂上を 7〜14 km/h で越える
+        # 頂上の止め時（ダンロップは目標 10 km/h）で、乾いた路面でも雨でも頂上を 7〜14 km/h で越える
         for variant in (None, "rain"):
             p = ss.load_params(self.path, variant)
             trace = []
@@ -786,6 +786,9 @@ class TestSuzuka(unittest.TestCase):
                         trace=trace, trace_every=1)
             top = min(kmh for _, _, lap, pos, kmh, _, _ in trace if lap == 3 and 1850 <= pos <= 1990)
             self.assertTrue(7.0 <= top <= 14.0, (variant, top))
+            # S 字の頂上（1,533 m、目標 14 km/h）も低い速度で越え、逆バンクへの下りで速度を戻す
+            s_top = min(kmh for _, _, lap, pos, kmh, _, _ in trace if lap == 3 and 1480 <= pos <= 1590)
+            self.assertTrue(12.0 <= s_top <= 17.0, (variant, s_top))
 
     def test_rain_brakes_on_the_downhill(self):
         rain = ss.load_params(self.path, "rain")

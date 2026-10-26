@@ -819,7 +819,7 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
     - coast_only_zones_m（[[開始 m, 終了 m], ...]）: 下りなど加速しない区間。目印でも保険の加速でも
       始めず、加速中に入ったらエンジンを止める
     - checkpoints_m（[m, ...]）: 周の途中で通過時刻を記録する位置（戻り値の checkpoints）
-    - crest_cut（{"from_m":, "crest_m":, "target_kmh":, "restart_kmh":}）: 頂上の手前の登り（from_m〜crest_m）で
+    - crest_cut（{"from_m":, "crest_m":, "target_kmh":, "restart_kmh":}、またはそのリスト）: 頂上の手前の登り（from_m〜crest_m）で
       加速しているとき、そこから惰行で頂上を target_kmh で越えられる速度（crest_cut_table）に達したらエンジンを止める。
       止めたあとは頂上まで、restart_kmh を割らない限り再始動しない。必要な速度は名目の走行抵抗で決めるので、
       crr_scale / k_scale の感度では頂上の速度がずれる
@@ -850,12 +850,13 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
     free = [tuple(z) for z in c.get("guard_free_zones_m", ())]
     free_min = c.get("guard_free_min_kmh", 12.0)
     no_burn = [tuple(z) for z in c.get("coast_only_zones_m", ())]
-    crest = c.get("crest_cut")
-    crest_req = crest_cut_table(p, course) if crest else None
+    crests = crest_cuts(c)
+    crest_zones = [(cc["from_m"], cc["crest_m"]) for cc in crests]
+    crest_req = crest_cut_table(p, course) if crests else None
     cresting = crest_pending = False    # 頂上の止め時でエンジンを止め、頂上へ惰行している / 止める合図を出した
 
     def in_crest(dist):
-        return bool(crest_req) and launched and in_zones(dist, [(crest["from_m"], crest["crest_m"])], lap)
+        return bool(crest_req) and launched and in_zones(dist, crest_zones, lap)
     cps = sorted(float(x) % lap for x in c.get("checkpoints_m", ()))
     s_per_kmh = c.get("pace_s_per_kmh", PACE_S_PER_KMH)
 
@@ -943,7 +944,8 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
                         want = False        # 惰行で速度が戻る区間では、保険の加速を待つ
                 if want and no_burn and in_zones(s, no_burn, lap) and (kmh > free_min or course.slope(s) < 0):
                     want = False            # 下りでは加速しない（速度は惰行で戻る。発進直後の低い速度でも下りなら待つ）
-                if want and cresting and kmh > crest.get("restart_kmh", 3.0):
+                if want and cresting and kmh > min(cc.get("restart_kmh", 3.0) for cc in crests
+                                                   if in_zones(s, [(cc["from_m"], cc["crest_m"])], lap)):
                     want = False            # 頂上の止め時で止めたあとは、止まりそうになるまで頂上へ惰行する
                 if want:
                     tc = _coast_home_s(course, s, v, crr, k, total, vfin) if total - s < 1500 else None
@@ -1002,22 +1004,32 @@ def _crest_cue(req: dict, pos: float, v: float, a: float, lag_s: float) -> bool:
     return (v + a * lag_s) * 3.6 >= req.get(int(pos2), math.inf)
 
 
+def crest_cuts(c: dict) -> list:
+    """course.crest_cut を頂上ごとのリストにする（1 つだけなら dict で書ける）。"""
+    cc = c.get("crest_cut")
+    if not cc:
+        return []
+    return [cc] if isinstance(cc, dict) else list(cc)
+
+
 def crest_cut_table(p: dict, course: Course) -> dict:
     """頂上の止め時（course.crest_cut）: {周内位置 m（整数）: エンジンを止めてよい速度 km/h}。
 
     頂上（crest_m）を target_kmh で越えるのに要る速度を、名目の走行抵抗で頂上から逆向きに積分する。
     止める合図からエンジンが止まるまでの遅れ（cut_lag_s）の間に進む分は、表には入れていない。
+    頂上が複数あるときは、それぞれの区間の表をまとめて返す。
     """
-    cc, veh = p["course"]["crest_cut"], p["vehicle"]
+    veh = p["vehicle"]
     crr, k = veh["crr"], veh["k_aero"]
-    s1, s0 = float(cc["crest_m"]), float(cc["from_m"])
-    v2 = (cc["target_kmh"] / 3.6) ** 2
     out = {}
-    s = s1
-    while s > s0:
-        s -= 1.0
-        v2 += 2 * (G * (crr + course.slope(s)) + k * v2)
-        out[int(s) % int(course.lap_m)] = math.sqrt(max(v2, 0.0)) * 3.6
+    for cc in crest_cuts(p["course"]):
+        s1, s0 = float(cc["crest_m"]), float(cc["from_m"])
+        v2 = (cc["target_kmh"] / 3.6) ** 2
+        s = s1
+        while s > s0:
+            s -= 1.0
+            v2 += 2 * (G * (crr + course.slope(s)) + k * v2)
+            out[int(s) % int(course.lap_m)] = math.sqrt(max(v2, 0.0)) * 3.6
     return out
 
 
@@ -1716,7 +1728,8 @@ def course_svg(course: Course, marks, spans, v_off: float, width: int = 900,
             lx, ly, anchor = spot(m, 34, text, 15, True, lines=2 if span else 1)
         out.append(label(m, 34, text, weight="bold", at_xy=(lx, ly, anchor)))
         if span:
-            if crest_cut and in_zones(span[1], [(crest_cut["from_m"], crest_cut["crest_m"])], course.lap_m):
+            if crest_cut and in_zones(span[1], [(cc["from_m"], cc["crest_m"]) for cc in crest_cuts({"crest_cut": crest_cut})],
+                                      course.lap_m):
                 sub = "約 %.0f km/h から、頂上の止め時で止める、%.0f m" % (span[2], span[1] - span[0])
             else:
                 sub = "約 %.0f → %.1f km/h、%.0f m" % (span[2], v_off, span[1] - span[0])

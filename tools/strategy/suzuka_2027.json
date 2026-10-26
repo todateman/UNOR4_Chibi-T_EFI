@@ -20,9 +20,11 @@
     "v_max_zones_m": [[1914, 1000, 75.0]],
     "_coast_only_zones_m": "加速しない区間。頂上（s≈1,914 m）から ID 1 をまたいで下りの底（s≈740 m）まで",
     "coast_only_zones_m": [[1914, 740]],
+    "_crest_cut": "頂上の止め時。ダンロップの登り（1,780 m〜頂上 1,916 m）では 29 km/h で止めず、惰行で頂上を target_kmh で越えられる速度（名目の走行抵抗で頂上から逆算。止める合図からエンジンが止まるまでの遅れも見込む）に達したら止める。止めたあとは restart_kmh を割らない限り再始動しない。目標 10 km/h は、GPS の位置のずれ ±5 m でも頂上で 7〜14 km/h に収まる値（6・8 km/h では、位置が 5 m 先にずれると止まる）",
+    "crest_cut": {"from_m": 1780, "crest_m": 1916, "target_kmh": 10.0, "restart_kmh": 3.0},
     "checkpoints_m": [760, 1914],
     "_pace_s_per_kmh": "停止速度 +1 km/h で 1 周あたり縮む秒数（plan の出力）。もてぎは 12 秒",
-    "pace_s_per_kmh": 5.5,
+    "pace_s_per_kmh": 2.8,
     "map_arrows_m": [400, 1300],
     "_map_list_xy": "コース図で加速開始位置の説明を並べる位置（コースが細長く、横に置くと重なるため）",
     "map_list_xy": [560, 190],
@@ -64,7 +66,7 @@
   "variants": {
     "rain": {
       "_comment": "雨の路面。走行抵抗はもてぎ 2026 の練習走行（雨）、速度の上限は 2025・2026 年の雨の鈴鹿で抑えた速さ",
-      "course": {"v_max_zones_m": [[1914, 1000, 55.0]], "pace_s_per_kmh": 3.3},
+      "course": {"v_max_zones_m": [[1914, 1000, 55.0]], "pace_s_per_kmh": 0.8},
       "vehicle": {"crr": 0.00281, "k_aero": 0.000309}
     }
   }

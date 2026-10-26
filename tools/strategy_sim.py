@@ -819,6 +819,10 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
     - coast_only_zones_m（[[開始 m, 終了 m], ...]）: 下りなど加速しない区間。目印でも保険の加速でも
       始めず、加速中に入ったらエンジンを止める
     - checkpoints_m（[m, ...]）: 周の途中で通過時刻を記録する位置（戻り値の checkpoints）
+    - crest_cut（{"from_m":, "crest_m":, "target_kmh":, "restart_kmh":}）: 頂上の手前の登り（from_m〜crest_m）で
+      加速しているとき、そこから惰行で頂上を target_kmh で越えられる速度（crest_cut_table）に達したらエンジンを止める。
+      止めたあとは頂上まで、restart_kmh を割らない限り再始動しない。必要な速度は名目の走行抵抗で決めるので、
+      crr_scale / k_scale の感度では頂上の速度がずれる
 
     burn に accel_real（実走の加速度。勾配と走行抵抗の分を足し戻した値）と accel_real_kmh があれば、
     ドラムの加速度と上乗せ率の代わりに使う。accel_scale はその倍率（感度用）。
@@ -846,6 +850,12 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
     free = [tuple(z) for z in c.get("guard_free_zones_m", ())]
     free_min = c.get("guard_free_min_kmh", 12.0)
     no_burn = [tuple(z) for z in c.get("coast_only_zones_m", ())]
+    crest = c.get("crest_cut")
+    crest_req = crest_cut_table(p, course) if crest else None
+    cresting = crest_pending = False    # 頂上の止め時でエンジンを止め、頂上へ惰行している / 止める合図を出した
+
+    def in_crest(dist):
+        return bool(crest_req) and launched and in_zones(dist, [(crest["from_m"], crest["crest_m"])], lap)
     cps = sorted(float(x) % lap for x in c.get("checkpoints_m", ()))
     s_per_kmh = c.get("pace_s_per_kmh", PACE_S_PER_KMH)
 
@@ -901,6 +911,17 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
             burn_time += dt_s
             if launched and no_burn and in_zones(s, no_burn, lap):
                 state, lag_left = "coast", None   # 下りに入ったら止める（止める合図は区間の手前で出す想定）
+            elif crest_req and launched and (crest_pending or (lag_left is None and _crest_cue(
+                    crest_req, s % lap, v, a, burn.get("cut_lag_s", 0.0)))):
+                # 頂上の止め時: 合図からエンジンが止まるまでの遅れ（cut_lag_s）のあいだも加速するので、
+                # 止まる時点の位置と速度を見込んで、残りの登りを惰行で越えられるところで合図を出す
+                crest_pending = True
+                lag_left = burn.get("cut_lag_s", 0.0) if lag_left is None else lag_left
+                lag_left -= dt_s
+                if lag_left <= 0:
+                    state, lag_left, cresting, crest_pending = "coast", None, True, False
+            elif in_crest(s) and kmh < cap * 3.6 - 0.5:
+                pass                        # 頂上の手前の登りでは、停止速度で止めず頂上の止め時まで回す
             elif kmh >= min(v_cut if launched else min(v_cut, launch_cut), cap * 3.6 - 0.5):
                 # 停止の合図から実際にエンジンが止まるまでの遅れ（cut_lag_s）は燃やし続ける
                 lag_left = burn.get("cut_lag_s", 0.0) if lag_left is None else lag_left
@@ -922,6 +943,8 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
                         want = False        # 惰行で速度が戻る区間では、保険の加速を待つ
                 if want and no_burn and in_zones(s, no_burn, lap) and (kmh > free_min or course.slope(s) < 0):
                     want = False            # 下りでは加速しない（速度は惰行で戻る。発進直後の低い速度でも下りなら待つ）
+                if want and cresting and kmh > crest.get("restart_kmh", 3.0):
+                    want = False            # 頂上の止め時で止めたあとは、止まりそうになるまで頂上へ惰行する
                 if want:
                     tc = _coast_home_s(course, s, v, crr, k, total, vfin) if total - s < 1500 else None
                     if tc is not None and t + tc <= c["limit_s"] - HOME_MARGIN_S:
@@ -943,6 +966,8 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
         v = max(v + a * dt_s, 0.3)
         if state == "crank" and not launched and restarts == 0:
             v = 0.0                 # 発進の始動中は輪止めとブレーキで止まっている
+        if cresting and not in_crest(s):
+            cresting = False
         if v > cap:
             brake += (v * v - cap * cap) / 2
             v = cap
@@ -969,6 +994,31 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
     return {"time_s": t, "fuel_ml": fuel, "burns": burns, "burn_time_s": burn_time,
             "crossings": crossings, "starts": starts, "finish_kmh": v * 3.6, "min_kmh": vmin,
             "max_kmh": vmax, "brake_j_per_kg": brake, "stalled": stalled, "checkpoints": checkpoints}
+
+
+def _crest_cue(req: dict, pos: float, v: float, a: float, lag_s: float) -> bool:
+    """頂上の止め時の合図を出すか。lag_s 後の位置と速度が、止めてよい速度の表に届いていれば出す。"""
+    pos2 = pos + v * lag_s + 0.5 * a * lag_s * lag_s
+    return (v + a * lag_s) * 3.6 >= req.get(int(pos2), math.inf)
+
+
+def crest_cut_table(p: dict, course: Course) -> dict:
+    """頂上の止め時（course.crest_cut）: {周内位置 m（整数）: エンジンを止めてよい速度 km/h}。
+
+    頂上（crest_m）を target_kmh で越えるのに要る速度を、名目の走行抵抗で頂上から逆向きに積分する。
+    止める合図からエンジンが止まるまでの遅れ（cut_lag_s）の間に進む分は、表には入れていない。
+    """
+    cc, veh = p["course"]["crest_cut"], p["vehicle"]
+    crr, k = veh["crr"], veh["k_aero"]
+    s1, s0 = float(cc["crest_m"]), float(cc["from_m"])
+    v2 = (cc["target_kmh"] / 3.6) ** 2
+    out = {}
+    s = s1
+    while s > s0:
+        s -= 1.0
+        v2 += 2 * (G * (crr + course.slope(s)) + k * v2)
+        out[int(s) % int(course.lap_m)] = math.sqrt(max(v2, 0.0)) * 3.6
+    return out
 
 
 def _coast_home_s(course, s, v, crr, k, total, vfin):
@@ -1467,7 +1517,8 @@ _BURN_COLOR = "#dc2626"
 
 def course_svg(course: Course, marks, spans, v_off: float, width: int = 900,
                start_finish: tuple | None = None, control: float = 0.0, guard_kmh: float | None = None,
-               name: str = "もてぎオーバル", arrows=(130.0, 1250.0), checkpoints=(), list_xy=None) -> str:
+               name: str = "もてぎオーバル", arrows=(130.0, 1250.0), checkpoints=(), list_xy=None,
+               crest_cut=None) -> str:
     """北を上にしたコース図。勾配で色分けし、加速開始位置と加速区間を重ねる。
 
     start_finish = (発進位置 m, ゴール位置 m) を渡すと、内側のレーンにある発進・ゴールの位置を描く。
@@ -1476,6 +1527,7 @@ def course_svg(course: Course, marks, spans, v_off: float, width: int = 900,
     回る向きはウェイポイントから判定し（course.clockwise）、ラベルはコースの外側に置く。
     arrows は進行方向の矢印を置く位置 m、checkpoints は周の途中の通過時刻を見る位置 m。
     list_xy = (x, y) を渡すと、加速開始位置の説明をコースの横ではなくその位置に一覧で並べる。
+    crest_cut（course.crest_cut）を渡すと、その区間で終わる加速は「頂上の止め時で止める」と書く。
     """
     side = -1.0 if course.clockwise else 1.0   # 外側が進行方向の右手なら +1
     pad_x, top, bottom = 200, 80, 130
@@ -1664,9 +1716,13 @@ def course_svg(course: Course, marks, spans, v_off: float, width: int = 900,
             lx, ly, anchor = spot(m, 34, text, 15, True, lines=2 if span else 1)
         out.append(label(m, 34, text, weight="bold", at_xy=(lx, ly, anchor)))
         if span:
+            if crest_cut and in_zones(span[1], [(crest_cut["from_m"], crest_cut["crest_m"])], course.lap_m):
+                sub = "約 %.0f km/h から、頂上の止め時で止める、%.0f m" % (span[2], span[1] - span[0])
+            else:
+                sub = "約 %.0f → %.1f km/h、%.0f m" % (span[2], v_off, span[1] - span[0])
             out.append('<text x="%.1f" y="%.1f" text-anchor="%s" dominant-baseline="middle" font-size="13" '
                        'fill="#374151" stroke="#ffffff" stroke-width="4" paint-order="stroke">'
-                       '約 %.0f → %.1f km/h、%.0f m</text>' % (lx, ly + 19, anchor, span[2], v_off, span[1] - span[0]))
+                       '%s</text>' % (lx, ly + 19, anchor, sub))
 
     # 方位・縮尺・凡例
     nx, ny = width - 50, top + 10
@@ -1699,7 +1755,8 @@ def cmd_map(args) -> int:
         f.write(course_svg(course, args.marks, spans, args.v_off, start_finish=sf,
                            control=control_m(c), guard_kmh=c.get("guard_kmh", 16.0),
                            name=c.get("name", "もてぎオーバル"), arrows=c.get("map_arrows_m", (130.0, 1250.0)),
-                           checkpoints=c.get("checkpoints_m", ()), list_xy=c.get("map_list_xy")))
+                           checkpoints=c.get("checkpoints_m", ()), list_xy=c.get("map_list_xy"),
+                           crest_cut=c.get("crest_cut")))
     print("コース図: %s" % args.out)
     print("位置 m | ID | 緯度, 経度 | 加速区間 m（3 周目、保険の加速を含む）")
     rows = [(m, next((sp for sp in spans if abs(sp[0] - m) < 60), None)) for m in sorted(args.marks)]

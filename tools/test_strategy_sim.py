@@ -667,6 +667,26 @@ class TestHillyCourse(unittest.TestCase):
         full = self.run_sim(dict(p, restart=dict(p["restart"], launch_cut_kmh=None)))
         self.assertLess(r["fuel_ml"], full["fuel_ml"])
 
+    def test_crest_cut_crosses_the_top_slowly(self):
+        # 600 m が頂上。手前の登りで、惰行で頂上を 10 km/h で越えられる速度に達したらエンジンを止める
+        cut = dict(self.p, course=dict(self.p["course"], coast_only_zones_m=[[600, 1800]],
+                                       crest_cut={"from_m": 400, "crest_m": 600, "target_kmh": 10.0, "restart_kmh": 3.0}))
+        plain = dict(self.p, course=dict(self.p["course"], coast_only_zones_m=[[600, 1800]]))
+
+        def top_kmh(p):
+            trace = []
+            r = self.run_sim(p, trace=trace, trace_every=1)
+            return r, min(kmh for _, _, lap, pos, kmh, _, _ in trace if lap == 3 and 550 <= pos <= 650)
+        r_cut, v_cut = top_kmh(cut)
+        r_plain, v_plain = top_kmh(plain)
+        self.assertAlmostEqual(v_cut, 10.0, delta=2.0)
+        self.assertGreater(v_plain, v_cut + 5.0)
+        self.assertFalse(r_cut["stalled"])
+        self.assertLess(r_cut["fuel_ml"], r_plain["fuel_ml"])
+        table = ss.crest_cut_table(cut, ss.course_from_params(cut))
+        self.assertGreater(table[450], table[550])            # 頂上に近いほど低い速度で止めてよい
+        self.assertAlmostEqual(table[599], 10.0, delta=0.5)
+
     def test_real_accel_table_replaces_drum(self):
         weak = self.run_sim(accel_scale=0.85)
         base = self.run_sim()
@@ -756,6 +776,16 @@ class TestSuzuka(unittest.TestCase):
             # 下り（頂上から下りの底まで）では加速を始めない
             self.assertFalse([pos for _, pos, _ in r["starts"][1:]
                               if ss.in_zones(pos, p["course"]["coast_only_zones_m"], self.course.lap_m)])
+
+    def test_crest_is_crossed_slowly(self):
+        # 頂上の止め時（目標 10 km/h）で、乾いた路面でも雨でも頂上を 7〜14 km/h で越える
+        for variant in (None, "rain"):
+            p = ss.load_params(self.path, variant)
+            trace = []
+            ss.simulate(p, ss.course_from_params(p), 29.0, v_on=p["course"]["guard_kmh"], laps=4,
+                        trace=trace, trace_every=1)
+            top = min(kmh for _, _, lap, pos, kmh, _, _ in trace if lap == 3 and 1850 <= pos <= 1990)
+            self.assertTrue(7.0 <= top <= 14.0, (variant, top))
 
     def test_rain_brakes_on_the_downhill(self):
         rain = ss.load_params(self.path, "rain")

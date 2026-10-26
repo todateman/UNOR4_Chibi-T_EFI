@@ -1546,6 +1546,10 @@ def course_svg(course: Course, marks, spans, v_off: float, width: int = 900,
         for s_m in range(int(s0), int(s1) + 1, 5):
             x, y = at(s_m)
             placed.append((x - 11, y - 11, x + 11, y + 11))
+    if list_xy:                              # 加速開始位置の一覧を置く場所（2 行 × 開始の数）
+        for n in range(max(len(spans), len(marks))):
+            y = list_xy[1] + n * 46
+            placed.append((list_xy[0], y - 11, list_xy[0] + 300, y + 30))
 
     def label(s, dist, text, size=15, weight="normal", fill="#111827", flip=True, lines=1, at_xy=None):
         x, y, anchor = at_xy or spot(s, dist, text, size, flip, lines)

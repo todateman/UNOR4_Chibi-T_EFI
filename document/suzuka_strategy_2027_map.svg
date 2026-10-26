@@ -20,8 +20,8 @@
 <text x="721.1" y="642.7" text-anchor="start" dominant-baseline="middle" font-size="13" font-weight="normal" fill="#7c3aed" stroke="#ffffff" stroke-width="4" paint-order="stroke">通過 760 m</text>
 <line x1="214.3" y1="136.0" x2="186.6" y2="140.2" stroke="#7c3aed" stroke-width="3"/>
 <text x="230.1" y="133.6" text-anchor="start" dominant-baseline="middle" font-size="13" font-weight="normal" fill="#7c3aed" stroke="#ffffff" stroke-width="4" paint-order="stroke">通過 1914 m</text>
-<line x1="292.4" y1="148.0" x2="328.0" y2="104.8" stroke="#111827" stroke-width="4"/>
-<text x="336.9" y="115.0" text-anchor="start" dominant-baseline="middle" font-size="15" font-weight="bold" fill="#111827" stroke="#ffffff" stroke-width="4" paint-order="stroke">コントロールライン（2135 m）</text>
+<line x1="391.2" y1="262.1" x2="434.5" y2="226.6" stroke="#111827" stroke-width="4"/>
+<text x="445.3" y="112.7" text-anchor="start" dominant-baseline="middle" font-size="15" font-weight="bold" fill="#111827" stroke="#ffffff" stroke-width="4" paint-order="stroke">コントロールライン（110 m）</text>
 <polyline points="408.8,450.7 407.5,446.6 406.3,442.3 405.1,438.2 404.0,434.6 402.8,430.4 401.2,426.7 399.3,423.4 396.2,420.2 393.4,417.4 390.6,414.5 387.6,411.4" fill="none" stroke="#ffffff" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
 <polyline points="408.8,450.7 407.5,446.6 406.3,442.3 405.1,438.2 404.0,434.6 402.8,430.4 401.2,426.7 399.3,423.4 396.2,420.2 393.4,417.4 390.6,414.5 387.6,411.4" fill="none" stroke="#dc2626" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
 <polyline points="356.7,399.7 352.5,398.8 348.5,398.4 344.6,398.2 340.2,398.1 336.3,397.9 332.3,397.7 327.9,397.5 324.0,397.4 319.9,397.3" fill="none" stroke="#ffffff" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>

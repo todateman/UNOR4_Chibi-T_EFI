@@ -22,22 +22,22 @@
 <text x="230.1" y="133.6" text-anchor="start" dominant-baseline="middle" font-size="13" font-weight="normal" fill="#7c3aed" stroke="#ffffff" stroke-width="4" paint-order="stroke">通過 1914 m</text>
 <line x1="392.2" y1="263.3" x2="435.5" y2="227.9" stroke="#111827" stroke-width="4"/>
 <text x="446.4" y="114.0" text-anchor="start" dominant-baseline="middle" font-size="15" font-weight="bold" fill="#111827" stroke="#ffffff" stroke-width="4" paint-order="stroke">コントロールライン（112 m）</text>
-<polyline points="408.7,450.4 407.4,446.2 406.2,441.9 405.0,437.9 403.9,434.2 402.7,430.0 401.1,426.4 399.1,423.1 395.9,420.0 393.2,417.1 390.3,414.2 387.3,411.1" fill="none" stroke="#ffffff" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
-<polyline points="408.7,450.4 407.4,446.2 406.2,441.9 405.0,437.9 403.9,434.2 402.7,430.0 401.1,426.4 399.1,423.1 395.9,420.0 393.2,417.1 390.3,414.2 387.3,411.1" fill="none" stroke="#dc2626" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
-<polyline points="356.4,399.6 352.2,398.7 348.2,398.4 344.2,398.2 339.8,398.1 336.0,397.9 331.9,397.7 327.6,397.5 323.8,397.4 319.6,397.2" fill="none" stroke="#ffffff" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
-<polyline points="356.4,399.6 352.2,398.7 348.2,398.4 344.2,398.2 339.8,398.1 336.0,397.9 331.9,397.7 327.6,397.5 323.8,397.4 319.6,397.2" fill="none" stroke="#dc2626" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
-<polyline points="278.1,241.9 278.0,238.1 277.6,234.2 276.1,230.9 274.5,227.3 272.9,223.7 271.4,220.4 269.9,216.9 268.2,213.2 266.7,210.0 264.6,206.9 261.8,204.0 258.5,201.6 255.6,199.4 252.7,197.1 249.4,194.7 246.4,192.5 243.3,190.6 239.6,188.8 236.3,187.3 233.0,185.7 229.3,183.9 226.0,182.3 222.6,180.8 218.9,179.0 216.0,176.4 213.5,173.6 211.3,170.7 208.8,167.5" fill="none" stroke="#ffffff" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
-<polyline points="278.1,241.9 278.0,238.1 277.6,234.2 276.1,230.9 274.5,227.3 272.9,223.7 271.4,220.4 269.9,216.9 268.2,213.2 266.7,210.0 264.6,206.9 261.8,204.0 258.5,201.6 255.6,199.4 252.7,197.1 249.4,194.7 246.4,192.5 243.3,190.6 239.6,188.8 236.3,187.3 233.0,185.7 229.3,183.9 226.0,182.3 222.6,180.8 218.9,179.0 216.0,176.4 213.5,173.6 211.3,170.7 208.8,167.5" fill="none" stroke="#dc2626" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="408.7" cy="450.4" r="11" fill="#dc2626" stroke="#ffffff" stroke-width="3"/>
-<text x="408.7" y="450.4" text-anchor="middle" dominant-baseline="central" font-size="13" font-weight="bold" fill="#ffffff">1</text>
+<polyline points="408.9,451.0 407.6,446.9 406.4,442.6 405.1,438.5 404.1,434.8 402.9,430.7 401.3,426.9 399.5,423.6 396.4,420.4 393.6,417.6 390.8,414.7 387.7,411.5" fill="none" stroke="#ffffff" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="408.9,451.0 407.6,446.9 406.4,442.6 405.1,438.5 404.1,434.8 402.9,430.7 401.3,426.9 399.5,423.6 396.4,420.4 393.6,417.6 390.8,414.7 387.7,411.5" fill="none" stroke="#dc2626" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="356.5,399.6 352.3,398.8 348.2,398.4 344.2,398.2 339.8,398.1 335.9,397.9 331.8,397.7 327.4,397.5 323.5,397.4 319.3,397.2" fill="none" stroke="#ffffff" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="356.5,399.6 352.3,398.8 348.2,398.4 344.2,398.2 339.8,398.1 335.9,397.9 331.8,397.7 327.4,397.5 323.5,397.4 319.3,397.2" fill="none" stroke="#dc2626" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="278.1,241.8 278.0,238.0 277.5,234.1 276.1,230.8 274.5,227.3 272.9,223.6 271.4,220.3 269.8,216.8 268.2,213.2 266.7,209.9 264.5,206.8 261.8,204.0 258.5,201.5 255.6,199.3 252.6,197.1 249.3,194.6 246.4,192.5 243.3,190.5 239.6,188.8 236.3,187.2 232.9,185.6 229.2,183.9 225.9,182.3 222.6,180.7 218.9,179.0 215.9,176.3 213.4,173.5 211.2,170.7 208.8,167.4" fill="none" stroke="#ffffff" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="278.1,241.8 278.0,238.0 277.5,234.1 276.1,230.8 274.5,227.3 272.9,223.6 271.4,220.3 269.8,216.8 268.2,213.2 266.7,209.9 264.5,206.8 261.8,204.0 258.5,201.5 255.6,199.3 252.6,197.1 249.3,194.6 246.4,192.5 243.3,190.5 239.6,188.8 236.3,187.2 232.9,185.6 229.2,183.9 225.9,182.3 222.6,180.7 218.9,179.0 215.9,176.3 213.4,173.5 211.2,170.7 208.8,167.4" fill="none" stroke="#dc2626" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="408.9" cy="451.0" r="11" fill="#dc2626" stroke="#ffffff" stroke-width="3"/>
+<text x="408.9" y="451.0" text-anchor="middle" dominant-baseline="central" font-size="13" font-weight="bold" fill="#ffffff">1</text>
 <text x="560.0" y="190.0" text-anchor="start" dominant-baseline="middle" font-size="15" font-weight="bold" fill="#111827" stroke="#ffffff" stroke-width="4" paint-order="stroke">1: 約 1320 m（21 km/h まで落ちたら）</text>
 <text x="560.0" y="209.0" text-anchor="start" dominant-baseline="middle" font-size="13" fill="#374151" stroke="#ffffff" stroke-width="4" paint-order="stroke">約 18 → 29.0 km/h、60 m</text>
-<circle cx="356.4" cy="399.6" r="11" fill="#dc2626" stroke="#ffffff" stroke-width="3"/>
-<text x="356.4" y="399.6" text-anchor="middle" dominant-baseline="central" font-size="13" font-weight="bold" fill="#ffffff">2</text>
+<circle cx="356.5" cy="399.6" r="11" fill="#dc2626" stroke="#ffffff" stroke-width="3"/>
+<text x="356.5" y="399.6" text-anchor="middle" dominant-baseline="central" font-size="13" font-weight="bold" fill="#ffffff">2</text>
 <text x="560.0" y="236.0" text-anchor="start" dominant-baseline="middle" font-size="15" font-weight="bold" fill="#111827" stroke="#ffffff" stroke-width="4" paint-order="stroke">2: 約 1430 m（21 km/h まで落ちたら）</text>
 <text x="560.0" y="255.0" text-anchor="start" dominant-baseline="middle" font-size="13" fill="#374151" stroke="#ffffff" stroke-width="4" paint-order="stroke">約 18 → 29.0 km/h、49 m</text>
-<circle cx="278.1" cy="241.9" r="11" fill="#dc2626" stroke="#ffffff" stroke-width="3"/>
-<text x="278.1" y="241.9" text-anchor="middle" dominant-baseline="central" font-size="13" font-weight="bold" fill="#ffffff">3</text>
+<circle cx="278.1" cy="241.8" r="11" fill="#dc2626" stroke="#ffffff" stroke-width="3"/>
+<text x="278.1" y="241.8" text-anchor="middle" dominant-baseline="central" font-size="13" font-weight="bold" fill="#ffffff">3</text>
 <text x="560.0" y="282.0" text-anchor="start" dominant-baseline="middle" font-size="15" font-weight="bold" fill="#111827" stroke="#ffffff" stroke-width="4" paint-order="stroke">3: 約 1730 m（21 km/h まで落ちたら）</text>
 <text x="560.0" y="301.0" text-anchor="start" dominant-baseline="middle" font-size="13" fill="#374151" stroke="#ffffff" stroke-width="4" paint-order="stroke">約 17 → 29.0 km/h、141 m</text>
 <polygon points="850,68 842,90 858,90" fill="#111827"/>

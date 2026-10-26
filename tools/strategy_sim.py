@@ -823,6 +823,8 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
     burn に accel_real（実走の加速度。勾配と走行抵抗の分を足し戻した値）と accel_real_kmh があれば、
     ドラムの加速度と上乗せ率の代わりに使う。accel_scale はその倍率（感度用）。
     restart の launch_delay_s は、発進でボタンを押してから動き出すまでの遅れ（その間は惰行と同じ）。
+    restart の launch_cut_kmh を書くと、発進の加速だけはその速度で止める（鈴鹿のように発進位置が下りで、
+    輪止めを越えたらあとは惰行で速度が上がる場合）。
     速度が 3 km/h を割ったら stalled を立てる（登りで止まった。完走できない）。
     """
     veh, burn, rst, c = p["vehicle"], p["burn"], p["restart"], p["course"]
@@ -865,10 +867,11 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
     s = s0
     fuel = rst["fuel_ml"]
     state, dead, burns, restarts, burn_time = "burn", 0.0, 1, 0, 0.0
+    launch_cut = rst.get("launch_cut_kmh") or math.inf
     if rst.get("launch_delay_s"):
         state, dead = "crank", rst["launch_delay_s"]
     lag_left = None
-    home = launched = stalled = False
+    home = launched = stalled = rolling = False
     crossings, starts, checkpoints = [], [(1, s0, 0.0)], []
     ci = bisect.bisect_right(cps, s0 % lap)
     clap = int(s0 // lap)
@@ -898,7 +901,7 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
             burn_time += dt_s
             if launched and no_burn and in_zones(s, no_burn, lap):
                 state, lag_left = "coast", None   # 下りに入ったら止める（止める合図は区間の手前で出す想定）
-            elif kmh >= min(v_cut, cap * 3.6 - 0.5):
+            elif kmh >= min(v_cut if launched else min(v_cut, launch_cut), cap * 3.6 - 0.5):
                 # 停止の合図から実際にエンジンが止まるまでの遅れ（cut_lag_s）は燃やし続ける
                 lag_left = burn.get("cut_lag_s", 0.0) if lag_left is None else lag_left
                 lag_left -= dt_s
@@ -917,8 +920,8 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
                     want = not (zone and zone[0] <= pos <= zone[1] and kmh > v_on - 4)
                     if want and in_free(s) and kmh > free_min:
                         want = False        # 惰行で速度が戻る区間では、保険の加速を待つ
-                if want and no_burn and in_zones(s, no_burn, lap) and kmh > free_min:
-                    want = False            # 下りでは加速しない（速度は惰行で戻る）
+                if want and no_burn and in_zones(s, no_burn, lap) and (kmh > free_min or course.slope(s) < 0):
+                    want = False            # 下りでは加速しない（速度は惰行で戻る。発進直後の低い速度でも下りなら待つ）
                 if want:
                     tc = _coast_home_s(course, s, v, crr, k, total, vfin) if total - s < 1500 else None
                     if tc is not None and t + tc <= c["limit_s"] - HOME_MARGIN_S:
@@ -930,12 +933,16 @@ def simulate(p: dict, course: Course, v_off: float, *, marks=(), v_on: float | N
                         dead = rst["delay_s"] + (fail_s if restarts in fail_at else 0.0)
                         state = "crank"
                         starts.append((len(crossings) + 1, s % lap, kmh))
-        if launched and not in_free(s):
+        # 発進の加速を低い速度で止めたとき（launch_cut_kmh）は、惰行で保険の加速の速度まで上がってから最低速度を数える
+        rolling = rolling or (launched and (v_on is None or kmh > v_on))
+        if rolling and not in_free(s):
             vmin = min(vmin, kmh)
         vmax = max(vmax, kmh)
         if launched and kmh < 3.0:
             stalled = True
         v = max(v + a * dt_s, 0.3)
+        if state == "crank" and not launched and restarts == 0:
+            v = 0.0                 # 発進の始動中は輪止めとブレーキで止まっている
         if v > cap:
             brake += (v * v - cap * cap) / 2
             v = cap

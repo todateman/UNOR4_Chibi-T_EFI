@@ -653,6 +653,20 @@ class TestHillyCourse(unittest.TestCase):
         late = dict(self.p, restart=dict(self.p["restart"], launch_delay_s=3.0))
         self.assertGreater(self.run_sim(late)["time_s"], self.run_sim()["time_s"] + 1.0)
 
+    def test_launch_cut_coasts_down_from_the_start(self):
+        # 下りの発進位置（600 m の頂上の先）から、発進の加速だけ 5 km/h で止めて惰行で速度を上げる
+        p = dict(self.p, course=dict(self.p["course"], start_m=650.0, coast_only_zones_m=[[600, 1800]]),
+                 restart=dict(self.p["restart"], launch_delay_s=2.0, launch_cut_kmh=5.0))
+        trace = []
+        r = self.run_sim(p, trace=trace, trace_every=1)
+        self.assertTrue(all(tr[1] == 650.0 for tr in trace if tr[0] < 1.95))      # 始動中は動かない
+        first_coast = next(tr for tr in trace if tr[5] == "coast")
+        self.assertLess(first_coast[4], 12.0)                                     # 低い速度でエンジンを止める
+        self.assertFalse([pos for _, pos, _ in r["starts"][1:] if 600 < pos < 1800])   # 下りの途中で再始動しない
+        self.assertGreater(r["min_kmh"], 15.0)                                    # 発進直後の低い速度は最低速度に数えない
+        full = self.run_sim(dict(p, restart=dict(p["restart"], launch_cut_kmh=None)))
+        self.assertLess(r["fuel_ml"], full["fuel_ml"])
+
     def test_real_accel_table_replaces_drum(self):
         weak = self.run_sim(accel_scale=0.85)
         base = self.run_sim()

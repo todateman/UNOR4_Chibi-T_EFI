@@ -21,6 +21,13 @@ pio run -e uno_r4_minima_inj_test -t upload    # 試験ファーム（UNO R4）
 この値は約200〜250msごとの更新で4点移動平均がかかっているため、バースト中の平均と垂れは分かるが、1発ごとの脈動は見えない。
 脈動を見たい場合は燃圧センサの出力をオシロのCH4へ入れる。
 
+燃料の加圧は [XIAO_PulseCreate](https://github.com/todateman/XIAO_PulseCreate) がタイマーで Hi → PWM → Lo を繰り返している
+（既定 0.2秒 → 7.8秒 → 0.5秒）。Lo の間は加圧が抜けてダイヤフラムが燃料を吸い直すので、噴射と無関係に回っていると、
+バーストの途中に燃圧の谷が1〜数回入る。`--pump-port` に XIAO のUSBシリアル（`DEBUG 1` のビルドが出す
+`countmode, hiTime, pwmTime, loTime, Duty / 4096` の行）を指定すると、ポンプが Hi に入って `--pump-settle-s`（既定1.0秒）
+経ってから噴き始め、Lo の `--pump-margin-s`（既定0.5秒）前までに噴き終えるよう、バーストを自動で分割して同期する。
+XIAO側のファームは変更不要。TriggerPin が LOW（ポンプ停止）のときは、その旨を表示して待つ。
+
 オシロの接続（既定。`--ch-*` で変更、0で未使用）:
 
 | チャネル | 接続先 | 分かること |
@@ -42,7 +49,7 @@ python tools/inj_bench.py run --ecu-port COM5 --fuel-port COM7 --pw-ms 4 --n 750
 
 # 計画CSVを順に実行。P2（N振り）を先に、オシロは先頭/終わり際を行ごとに交互に撮る
 python tools/inj_bench.py plan document/injector_test_log_template.csv --phase P2,P1 \
-    --ecu-port COM5 --fuel-port COM7 --scope alt --cur-a-per-v 10 \
+    --ecu-port COM5 --fuel-port COM7 --pump-port COM9 --scope alt --cur-a-per-v 10 \
     --operator yabuki --fuel-temp 25 --out document/injector_test_log_20261115.csv
 ```
 
@@ -50,11 +57,13 @@ python tools/inj_bench.py plan document/injector_test_log_template.csv --phase P
 - 重量は、はかりの表示を見てキーボードから入力する。捨て打ち（既定20発）の後に開始重量を読むので、容器は載せたままでよい。
 - 1回に連続で噴く量が `--max-burst-ml`（既定1.5ml。ダイヤフラムポンプ2ccに対する余裕）を超える場合は自動で分割する。
   分割の間は `--resume` で続行方法を選ぶ: `enter`（再加圧してEnter）/ `pressure`（燃圧が戻ったら自動）/ `time`（`--pause-s` 秒後）。
+  `--pump-port` を指定した場合は `--resume` によらずポンプ周期に同期し、1回分は「加圧が安定している区間に収まる発数」
+  （既定設定・周期50msなら124発）と上記の量の上限の小さい方になる。
 - 周期は `--period-ms`（既定50ms）で固定。第1版の「OFF区間50ms」と違い、パルス幅によらず1発ごとの間隔が同じになる。
 - オシロを使わない場合は、バーストごとに電源電圧の入力を求める（Enterで前回値）。`--vbat` で固定値も指定できる。
 - Ctrl+C やエラーで止まったときは、試験ファームへ停止 `S` を送ってから終了する。
 
-出力CSVは `injector_test_log_template.csv` の列をそのまま持ち、その後ろに実発数・実測パルス幅・燃圧の統計・オシロの解析値を追加している。
+出力CSVは `injector_test_log_template.csv` の列をそのまま持ち、その後ろに実発数・実測パルス幅・燃圧の統計・ポンプ設定・オシロの解析値を追加している。
 
 ## 解析（inj_analyze.py）
 

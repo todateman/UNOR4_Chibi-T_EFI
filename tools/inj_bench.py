@@ -19,6 +19,10 @@ Chibi-T_Furoshiki_AutoAirAdjust（sensing-only ビルド）のUSBシリアルか
 流れ: 設定送信 → 捨て打ち → 開始重量の入力 → （オシロをアーム）→ 開始 → 燃圧を記録
       → 分割バーストの再加圧待ち → 完了 → 終了重量の入力 → 波形取得・解析 → CSVへ1行追記
 
+燃料の加圧は XIAO_PulseCreate がタイマーで Hi → PWM → Lo を繰り返している（Lo の間は加圧が抜けて
+ダイヤフラムが燃料を吸い直す）。--pump-port にそのUSBシリアルを指定すると、加圧が安定している区間だけに
+噴射を収めるよう、バーストを自動で分割してポンプ周期に同期させる。
+
 pyserial が必要。オシロを使う場合は pyvisa と numpy も必要（tools/requirements.txt）。
 """
 import argparse
@@ -41,6 +45,7 @@ LOG_COLUMNS = [
     "周期_ms", "分割発数", "実発数", "実測幅_平均_us", "実測幅_最小_us", "実測幅_最大_us",
     "周期_最小_us", "周期_最大_us", "所要時間_s", "待ち時間_s", "中断",
     "燃圧平均_MPa", "燃圧最小_MPa", "燃圧最大_MPa", "燃圧サンプル数",
+    "ポンプ同期", "ポンプ_Hi_ms", "ポンプ_PWM_ms", "ポンプ_Lo_ms", "ポンプ_Duty_%",
     "オシロ_取得位置", "オシロ_電源電圧_V", "オシロ_端子パルス幅_ms", "オシロ_指令幅_ms",
     "オシロ_ON遅れ_us", "オシロ_OFF遅れ_us", "オシロ_フライバック最大_V", "オシロ_フライバック継続_ms",
     "オシロ_クランプ種別", "オシロ_電流ピーク_A", "オシロ_電流減衰_ms", "オシロ_開弁キンク_ms",
@@ -160,6 +165,84 @@ class FuelMonitor(threading.Thread):
         return sum(w) / len(w) if w else None
 
 
+class PumpMonitor(threading.Thread):
+    """XIAO_PulseCreate のデバッグ出力 'countmode, hiTime, pwmTime, loTime, Duty / 4096' を読む。
+
+    countmode: 0=停止 1=Hi(100%) 2=PWM(保持) 3=Lo(加圧が抜けて吸い直し)。
+    Hi に入った時刻を周期の起点として覚え、「加圧が安定している残り時間」を答える。
+    scale は擬似デバイス用（ポンプ側の時間が実時間の何倍で進むか）。実機では 1。
+    """
+
+    PAT = re.compile(rb"^\s*([0-3])\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*/")
+
+    def __init__(self, ser, scale=1.0):
+        super().__init__(daemon=True)
+        self.ser = ser
+        self.scale = scale
+        self._halt = threading.Event()
+        self.mode = None            # 直近の countmode
+        self.hi = self.pwm = self.lo = self.duty = None
+        self.t_line = None          # 直近の行を受けた時刻
+        self.t_cycle = None         # 直近に Hi へ入ったのを見た時刻（周期の起点）
+
+    def run(self):
+        while not self._halt.is_set():
+            try:
+                raw = self.ser.readline()
+            except Exception:
+                break
+            m = self.PAT.match(raw or b"")
+            if not m:
+                continue
+            now = time.monotonic()
+            mode = int(m.group(1))
+            self.hi, self.pwm, self.lo, self.duty = (int(m.group(i)) for i in (2, 3, 4, 5))
+            if mode in (0, 3):
+                self.t_cycle = None
+            elif self.mode in (0, 3):
+                # 停止/Lo から加圧に入った。Hi の行を取りこぼして PWM から見えた場合は、Hi の分だけ前倒しする
+                self.t_cycle = now - (self.hi / 1000.0 / self.scale if mode == 2 else 0.0)
+            self.mode, self.t_line = mode, now
+
+    def stop(self):
+        self._halt.set()
+
+    def alive(self):
+        return self.t_line is not None and time.monotonic() - self.t_line < 2.0
+
+    def window_s(self, settle, margin):
+        """1周期のうち噴射に使える長さ [s]（ポンプ時間）。"""
+        return (self.hi + self.pwm) / 1000.0 - settle - margin
+
+    def remaining_s(self, settle, margin):
+        """今すぐ噴き始めた場合に使える残り時間 [s]。使えない状態なら 0 以下、周期未確認なら None。"""
+        if self.mode not in (1, 2) or self.t_cycle is None:
+            return None if self.mode in (1, 2) else 0.0
+        elapsed = (time.monotonic() - self.t_cycle) * self.scale
+        if elapsed < settle:
+            return 0.0
+        return (self.hi + self.pwm) / 1000.0 - margin - elapsed
+
+    def wait_window(self, need_s, settle, margin, timeout_s=60.0):
+        """加圧が安定していて、need_s 秒ぶん噴ける区間に入るまで待つ。入れたら True。"""
+        t_end = time.monotonic() + timeout_s / self.scale
+        t_stopped = None
+        while time.monotonic() < t_end:
+            if not self.alive():
+                return False
+            if self.mode == 0:              # 停止が3秒続いたら待つのをやめて呼び出し側に知らせる
+                t_stopped = t_stopped or time.monotonic()
+                if time.monotonic() - t_stopped > 3.0:
+                    return False
+            else:
+                t_stopped = None
+            rem = self.remaining_s(settle, margin)
+            if rem is not None and rem >= need_s:
+                return True
+            time.sleep(0.01 if self.scale > 1 else 0.02)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # 機材なしで流れを確認するための擬似デバイス
 # ---------------------------------------------------------------------------
@@ -265,6 +348,23 @@ class FakeFuelSerial:
         pass
 
 
+class FakePumpSerial:
+    """XIAO_PulseCreate のデバッグ出力をまねる（Hi 0.2s → PWM 7.8s → Lo 0.5s を speed 倍速で繰り返す）。"""
+
+    def __init__(self, speed=20.0, hi=200, pwm=7800, lo=500, duty=25):
+        self.speed, self.hi, self.pwm, self.lo, self.duty = speed, hi, pwm, lo, duty
+        self.t0 = time.monotonic()
+
+    def readline(self):
+        time.sleep(0.1 / self.speed)
+        t = ((time.monotonic() - self.t0) * self.speed * 1000.0) % (self.hi + self.pwm + self.lo)
+        mode = 1 if t < self.hi else (2 if t < self.hi + self.pwm else 3)
+        return f"{mode}, {self.hi}, {self.pwm}, {self.lo}, {self.duty} / 4096\n".encode()
+
+    def close(self):
+        pass
+
+
 def fake_scale(pw_us, n, noise=0.012):
     """擬似はかり。総質量[g] = N×0.55mg/ms×(PW−0.60ms) + 0.05g（バースト固定分）+ 読み取りばらつき。"""
     mg = n * 0.55 * (pw_us / 1000.0 - 0.60) + 50.0
@@ -307,17 +407,40 @@ def fmt(v, nd=3):
 
 def do_burst(ctx, job):
     """job: dict(no, phase, rep, pw_us, n, target_mpa, target_v, note)。CSVの1行(dict)を返す。"""
-    a, ecu, fuel, scope = ctx["args"], ctx["ecu"], ctx["fuel"], ctx["scope"]
+    a, ecu, fuel, scope, pump = ctx["args"], ctx["ecu"], ctx["fuel"], ctx["scope"], ctx.get("pump")
     pw_us, n = job["pw_us"], job["n"]
     sub = a.sub if a.sub is not None else pick_sub_count(pw_us, n, a.max_burst_ml, a.density)
-    pause_ms = int(a.pause_s * 1000) if a.resume == "time" else 0
-    if sub and a.resume == "time" and pause_ms == 0:
+    resume = "pump" if pump else a.resume
+    if pump:
+        # ポンプ1周期の「加圧が安定している区間」に収まる発数まで、分割をさらに細かくする
+        win = pump.window_s(a.pump_settle_s, a.pump_margin_s)
+        fit = int((win - 0.3) / (a.period_ms / 1000.0))   # 0.3秒は開始タイミングのずれに対する余裕
+        if fit < 5:
+            raise SystemExit(f"ポンプの加圧区間（{win:.1f}秒）が短すぎます。--pump-settle-s / --pump-margin-s か "
+                             "XIAO_PulseCreate の PWM 時間を見直してください")
+        if n > fit or (sub and sub > fit):
+            sub = min(sub, fit) if sub else fit
+    pause_ms = int(a.pause_s * 1000) if resume == "time" else 0
+    if sub and resume == "time" and pause_ms == 0:
         raise SystemExit("--resume time には --pause-s が必要です")
+    chunk_s = (min(sub, n) if sub else n) * a.period_ms / 1000.0
+
+    def wait_pump(what):
+        """ポンプ同期: 加圧が安定していて、次の1回分が収まる区間に入るまで待つ。"""
+        if not pump:
+            return
+        while not pump.wait_window(chunk_s, a.pump_settle_s, a.pump_margin_s):
+            state = {0: "停止中（TriggerPin が LOW）", None: "応答なし"}.get(
+                pump.mode if pump.alive() else None, "周期を確認できません")
+            if a.simulate:
+                raise RuntimeError(f"ポンプ同期に失敗しました: {state}")
+            input(f"  ポンプが {state}。{what}できません。ポンプを動かしてから Enter: ")
 
     cmd, armed = ecu.configure(pw_us, n, a.period_ms, sub, pause_ms)
     est_s = n * a.period_ms / 1000.0
     print(f"  設定: {pw_us}us x {n}発, 周期{a.period_ms}ms（約{est_s:.0f}秒）"
-          + (f", {sub}発ごとに分割" if sub else ""))
+          + (f", {sub}発ごとに分割" if sub else "")
+          + ("（ポンプ周期に同期）" if pump else ""))
     if not armed:
         input("  キルスイッチがOFF(導通)になっていません。操作してから Enter: ")
 
@@ -344,6 +467,7 @@ def do_burst(ctx, job):
         st = scope.arm(pw_us / 1000.0)
         print(f"  オシロをアーム（先頭の1発, status={st}）")
 
+    wait_pump("開始")
     p_before = fuel.recent_mean(1.0) if fuel else None
     ecu.drain(0.1)
     t_start = time.monotonic()
@@ -372,7 +496,10 @@ def do_burst(ctx, job):
         elif kind == "PAUSE":
             fired = int(kv.get("fired", 0))
             print(f"\r  分割待ち {fired}/{n}      ")
-            if a.resume == "pressure" and fuel:
+            if resume == "pump":
+                wait_pump("続行")
+                ecu.send("C")
+            elif resume == "pressure" and fuel:
                 target = a.resume_mpa if a.resume_mpa else (job.get("target_mpa") or 0.35) - 0.01
                 t_end = time.monotonic() + a.resume_timeout
                 ok = False
@@ -386,7 +513,7 @@ def do_burst(ctx, job):
                     input(f"  燃圧が {target:.3f}MPa まで戻りません。再加圧してから Enter: ")
                 time.sleep(a.settle_s)
                 ecu.send("C")
-            elif a.resume == "time":
+            elif resume == "time":
                 pass                      # ファーム側が H<ms> 後に自動で続行する
             elif a.simulate:
                 time.sleep(0.2)
@@ -440,6 +567,12 @@ def do_burst(ctx, job):
                     "燃圧最大_MPa": fmt(max(pw), 4), "燃圧サンプル数": len(pw)})
         print(f"  燃圧: 前 {fmt(p_before, 3)} / 平均 {row['燃圧平均_MPa']} / 最小 {row['燃圧最小_MPa']} / "
               f"後 {fmt(p_after, 3)} MPa（{len(pw)}点）")
+
+    if pump:
+        row.update({"ポンプ同期": "pump", "ポンプ_Hi_ms": pump.hi, "ポンプ_PWM_ms": pump.pwm,
+                    "ポンプ_Lo_ms": pump.lo, "ポンプ_Duty_%": pump.duty})
+    else:
+        row["ポンプ同期"] = "none"
 
     vbat = a.vbat
     if vbat is None and not scope and not a.simulate:
@@ -553,10 +686,13 @@ def load_plan(path, phases):
 
 
 def open_devices(a):
-    ctx = {"args": a, "ecu": None, "fuel": None, "scope": None, "_close": []}
+    ctx = {"args": a, "ecu": None, "fuel": None, "scope": None, "pump": None, "_close": []}
+    pser, pump_scale = None, 1.0
     if a.simulate:
         ser = FakeEcuSerial()
         fser = FakeFuelSerial()
+        if a.pump_port:
+            pser, pump_scale = FakePumpSerial(speed=ser.speed), ser.speed
     else:
         import serial
         if not a.ecu_port:
@@ -569,6 +705,8 @@ def open_devices(a):
             fser.dtr = False
             fser.rts = False
             fser.open()
+        if a.pump_port:
+            pser = serial.Serial(a.pump_port, 115200, timeout=0.5)
     ctx["_close"].append(ser)
     ctx["ecu"] = Ecu(ser, echo=a.verbose)
     time.sleep(0.3)
@@ -590,6 +728,23 @@ def open_devices(a):
     else:
         print("燃圧ポートの指定なし: 燃圧は記録しません")
 
+    if pser is not None:
+        ctx["_close"].append(pser)
+        pm = PumpMonitor(pser, scale=pump_scale)
+        pm.start()
+        t_end = time.monotonic() + 3.0
+        while pm.mode is None and time.monotonic() < t_end:
+            time.sleep(0.05)
+        if pm.mode is None:
+            raise SystemExit("XIAO_PulseCreate のデバッグ出力を受信できません。ポートと DEBUG 1 のビルドを確認してください")
+        print(f"ポンプ: Hi {pm.hi}ms / PWM {pm.pwm}ms / Lo {pm.lo}ms / Duty {pm.duty}%"
+              f"（1周期のうち噴射に使うのは {pm.window_s(a.pump_settle_s, a.pump_margin_s):.1f}秒）")
+        if pm.mode == 0:
+            print("  ※ ポンプは停止中（TriggerPin が LOW）。キルスイッチの状態を確認してください")
+        ctx["pump"] = pm
+    else:
+        print("ポンプポートの指定なし: ポンプ周期には同期しません（加圧が抜ける Lo 区間にも噴きます）")
+
     if a.scope != "none" and not a.simulate:
         import inj_scope
         ctx["scope"] = inj_scope.Scope(a.scope_resource, inj_scope.channels_from_args(a), a.trig_level)
@@ -600,6 +755,8 @@ def open_devices(a):
 def close_devices(ctx):
     if ctx.get("fuel"):
         ctx["fuel"].stop()
+    if ctx.get("pump"):
+        ctx["pump"].stop()
     if ctx.get("scope"):
         ctx["scope"].close()
     for s in ctx["_close"]:
@@ -653,6 +810,12 @@ def cmd_plan(a):
 def add_common(p):
     p.add_argument("--ecu-port", help="試験ファーム（UNO R4）のシリアルポート")
     p.add_argument("--fuel-port", help="AutoAirAdjust（sensing-only）のシリアルポート。省略時は燃圧を記録しない")
+    p.add_argument("--pump-port", help="XIAO_PulseCreate のシリアルポート。指定するとポンプ周期に同期して噴く"
+                                       "（--simulate では任意の文字列で擬似ポンプが動く）")
+    p.add_argument("--pump-settle-s", type=float, default=1.0,
+                   help="ポンプが Hi に入ってから噴き始めるまでの待ち秒数（再加圧後の整定。既定 1.0）")
+    p.add_argument("--pump-margin-s", type=float, default=0.5,
+                   help="ポンプが Lo に入る何秒前までに噴き終えるか（既定 0.5）")
     p.add_argument("--out", required=True, help="結果を追記するCSV")
     p.add_argument("--period-ms", type=int, default=50, help="周期 ms（ONからON。既定 50）")
     p.add_argument("--prime", type=int, default=20, help="計量前の捨て打ち発数（0で無効。既定 20）")

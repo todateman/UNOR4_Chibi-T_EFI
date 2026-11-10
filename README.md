@@ -18,6 +18,7 @@ Arduino UNO R4（RA4M1）/ 互換環境上で動作するエコラン車両用EC
 - [src/main.cpp](src/main.cpp) : コアロジック
 - [src/injector_test.cpp](src/injector_test.cpp) : インジェクタ特性調査用独立プログラム
 - [src/fastestdigitalRW.hpp](src/fastestdigitalRW.hpp) : ボード別最速 GPIO
+- [tools/](tools/README.md) : インジェクタ流量試験のPC側スクリプト（測定実行・オシロ取得・回帰解析）
 - [lib/AGTimer_R4_Library](lib/AGTimer_R4_Library) : 周期タイマ
 - [platformio.ini](platformio.ini) : ビルド環境定義
 - microSD/ : 走行ログや MAP 用 CSV（将来拡張）

@@ -63,6 +63,8 @@ ECUプログラム側の準備： `INJ_test`ブランチに `src/injector_test.c
   - インジェクタ試験: `pio run -e uno_r4_minima_inj_test -t upload`
   - 実車ファーム（通常運転）: `pio run -e uno_r4_minima -t upload`
 
+第2版（2026-11）: 試験プログラムを `main.cpp` と同じ割り込み方式のパルス生成に変更し、us指定（`U`）・固定周期（`T`）・シリアルからの開始/停止（`G`/`S`）・分割バースト（`B`/`H`/`C`）・捨て打ち（`Q`）を追加した。PC側の `tools/inj_bench.py` を使うと、設定送信・燃圧記録・オシロ波形の取得・CSVへの記録を1バースト1コマンドで実行できる。解析は `tools/inj_analyze.py`。使い方は [tools/README.md](../tools/README.md) を参照（従来の `W`/`N`/`I` とスタータボタンでの開始もそのまま使える）。
+
 測定手順：
 
 1. アキュームレータ・レギュレータで規定燃圧まで加圧

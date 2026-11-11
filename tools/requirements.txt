@@ -2,3 +2,4 @@ pyserial>=3.5
 numpy>=1.24
 matplotlib>=3.7     # inj_analyze.py --plot を使う場合
 pyvisa>=1.13        # DHO804 を使う場合（--scope first/last/alt, inj_scope.py arm/wait/read）
+pyvisa-py>=0.7      # 同上。LAN（TCPIP）で DHO804 とつなぐ VISA 実装

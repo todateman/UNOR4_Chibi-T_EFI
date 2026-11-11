@@ -6,12 +6,12 @@ Chibi-T_Furoshiki_AutoAirAdjust（sensing-only ビルド）のUSBシリアルか
 必要ならRIGOL DHO804で1発分の波形を撮る。重量は目視の値をキーボードから入力する。
 
   # 1バーストだけ実行（4ms x 750発、周期50ms）
-  python tools/inj_bench.py run --ecu-port COM5 --fuel-port COM7 --pw-ms 4 --n 750 \
+  python tools/inj_bench.py run --ecu-port /dev/cu.usbmodem101 --fuel-port /dev/cu.usbserial-XXXX --pw-ms 4 --n 750 \
       --out document/injector_test_log_20261115.csv
 
   # 計画CSV（document/injector_test_log_template.csv）を上から順に実行。P2を先に
   python tools/inj_bench.py plan document/injector_test_log_template.csv --phase P2,P1 \
-      --ecu-port COM5 --fuel-port COM7 --scope alt --out document/injector_test_log_20261115.csv
+      --ecu-port /dev/cu.usbmodem101 --fuel-port /dev/cu.usbserial-XXXX --scope alt --out document/injector_test_log_20261115.csv
 
   # 機材なしで流れを確認（擬似ECU・擬似燃圧・擬似はかり）
   python tools/inj_bench.py plan document/injector_test_log_template.csv --phase P2 --simulate --out sim.csv

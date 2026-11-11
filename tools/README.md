@@ -37,11 +37,10 @@ XIAO側のファームは変更不要。TriggerPin が LOW（ポンプ停止）�
 | CH3 | INJ_OUT（A0）の指令信号 | 指令幅、ドライバ段のON/OFF遅れ |
 | CH4 | 燃圧センサ出力（0.5V=0MPa, 4.5V=1.0MPa） | 通電前後の燃圧 |
 
-オシロとの通信は `--scope-resource` で指定する（既定は USB の `USB0::6833::1101::DHO8A253701207::0::INSTR`）。
-
-- Windows で USB: NI-VISA を入れる
-- macOS: LAN でつなぎ、`--scope-resource TCPIP::<オシロのIP>::INSTR` を使う（`pip install pyvisa-py` が必要）。
-  pyvisa-py の USB では、設定・測定値の問い合わせは通るが、波形の読み出し（`:WAVeform:DATA?`）が返ってこない（2026-11-11 確認）
+オシロは LAN でつなぐ（試験は macOS で行う）。既定の接続先は `TCPIP::192.168.1.2::INSTR`（Mac 側の USB-LAN アダプタを 192.168.1.1 にして直結）で、
+違う場合は `--scope-resource` で指定する。VISA は pyvisa-py を使う（`requirements.txt` に含む）。
+USB 直結（`USB0::6833::1101::DHO8A253701207::0::INSTR`）は、設定・測定値の問い合わせは通るが、
+pyvisa-py では波形の読み出し（`:WAVeform:DATA?`）が返ってこないので使わない（2026-11-11 確認）。
 
 ## 測定（inj_bench.py）
 
@@ -50,12 +49,12 @@ XIAO側のファームは変更不要。TriggerPin が LOW（ポンプ停止）�
 python tools/inj_bench.py plan document/injector_test_log_template.csv --phase P2 --simulate --out sim.csv
 
 # 1バーストだけ（4ms x 750発）
-python tools/inj_bench.py run --ecu-port COM5 --fuel-port COM7 --pw-ms 4 --n 750 \
+python tools/inj_bench.py run --ecu-port /dev/cu.usbmodem101 --fuel-port /dev/cu.usbserial-XXXX --pw-ms 4 --n 750 \
     --out document/injector_test_log_20261115.csv
 
 # 計画CSVを順に実行。P2（N振り）を先に、オシロは先頭/終わり際を行ごとに交互に撮る
 python tools/inj_bench.py plan document/injector_test_log_template.csv --phase P2,P1 \
-    --ecu-port COM5 --fuel-port COM7 --pump-port COM9 --scope alt --cur-a-per-v 10 \
+    --ecu-port /dev/cu.usbmodem101 --fuel-port /dev/cu.usbserial-XXXX --pump-port /dev/cu.usbmodemYYYY --scope alt --cur-a-per-v 10 \
     --operator yabuki --fuel-temp 25 --out document/injector_test_log_20261115.csv
 ```
 

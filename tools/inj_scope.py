@@ -27,7 +27,8 @@ try:
 except ImportError:      # 引数定義だけ使う場合（inj_bench.py でオシロなし）は numpy 不要
     np = None
 
-DEFAULT_RESOURCE = "USB0::6833::1101::DHO8A253701207::0::INSTR"
+# LAN 直結（Mac 側 192.168.1.1）。macOS + pyvisa-py の USB では波形の読み出しが返ってこないため LAN を既定にする
+DEFAULT_RESOURCE = "TCPIP::192.168.1.2::INSTR"
 CHUNK = 125000
 ROLES = ("inj", "cur", "cmd", "fuel")
 

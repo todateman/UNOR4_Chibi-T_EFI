@@ -66,6 +66,7 @@ class Scope:
         tb = tb or nice_timebase(pw_ms)
         w = self.inst.write
         w(f":TIMebase:MAIN:SCALe {tb}")
+        w(":TIMebase:MAIN:OFFSet 0")      # 解析はトリガー点が画面中央の前提。手で動かした位置を戻す
         w(":TRIGger:MODE EDGE")
         w(f":TRIGger:EDGE:SOURce CHAN{self.channels['inj']}")
         w(":TRIGger:EDGE:SLOPe NEGative")
@@ -82,14 +83,23 @@ class Scope:
             time.sleep(0.2)
         return False
 
+    def _depth(self):
+        """メモリ長（点数）。読めなければ 1M 点とみなす。"""
+        try:
+            return int(float(self.q(":ACQuire:MDEPth?")))
+        except (ValueError, TypeError):
+            return 1000000
+
     def _fetch(self, ch):
         w = self.inst.write
+        depth = self._depth()
         w(f":WAVeform:SOURce CHANnel{ch}")
         w(":WAVeform:MODE RAW")
         w(":WAVeform:FORMat WORD")
-        # 前回のSTARt/STOPが残っているとプリアンブルの点数が切れるため、毎回全範囲に戻す
+        # 前回のSTARt/STOPが残っているとプリアンブルの点数が切れるため、毎回全範囲に戻す。
+        # STOP を 1M 固定にすると、メモリ長 10M 以上のとき先頭の 1M 点しか読めない（実機で確認）
         w(":WAVeform:STARt 1")
-        w(":WAVeform:STOP 1000000")
+        w(f":WAVeform:STOP {depth}")
         pre = self.q(":WAVeform:PREamble?").split(",")
         n = int(pre[2])
         vals = []
@@ -102,7 +112,7 @@ class Scope:
                 ":WAVeform:DATA?", datatype="H", is_big_endian=False, container=list)
             s = e + 1
         w(":WAVeform:STARt 1")
-        w(":WAVeform:STOP 1000000")
+        w(f":WAVeform:STOP {depth}")
         xinc, xorg = float(pre[4]), float(pre[5])
         yinc, yorg, yref = float(pre[7]), float(pre[8]), float(pre[9])
         volts = (np.asarray(vals, dtype=np.float64) - yorg - yref) * yinc

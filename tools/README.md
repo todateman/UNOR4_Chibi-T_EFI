@@ -37,6 +37,12 @@ XIAO側のファームは変更不要。TriggerPin が LOW（ポンプ停止）�
 | CH3 | INJ_OUT（A0）の指令信号 | 指令幅、ドライバ段のON/OFF遅れ |
 | CH4 | 燃圧センサ出力（0.5V=0MPa, 4.5V=1.0MPa） | 通電前後の燃圧 |
 
+オシロとの通信は `--scope-resource` で指定する（既定は USB の `USB0::6833::1101::DHO8A253701207::0::INSTR`）。
+
+- Windows で USB: NI-VISA を入れる
+- macOS: LAN でつなぎ、`--scope-resource TCPIP::<オシロのIP>::INSTR` を使う（`pip install pyvisa-py` が必要）。
+  pyvisa-py の USB では、設定・測定値の問い合わせは通るが、波形の読み出し（`:WAVeform:DATA?`）が返ってこない（2026-11-11 確認）
+
 ## 測定（inj_bench.py）
 
 ```sh

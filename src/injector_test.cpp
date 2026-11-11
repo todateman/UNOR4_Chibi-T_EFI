@@ -59,6 +59,8 @@ static const uint32_t N_MAX          = 100000;
 static const uint32_t OFF_US_MIN     = 2000;   // 最低OFF時間（閉弁完了とコイル放電の余裕）
 static const uint16_t KILL_DEBOUNCE  = 40;     // キルスイッチ復帰の確定に必要な連続回数（約1ms）
 static const uint32_t PROG_INTERVAL_MS = 250;
+static const uint32_t STARTER_RELEASE_MS = 100; // スタータボタンを「離した」と見なすのに必要な連続HIGH時間
+static const uint32_t SERIAL_WAIT_MS   = 3000;  // 起動時にPCのポート接続を待つ最大時間
 
 const uint8_t STR_IN       = 6;   // スタータボタン入力
 const uint8_t ENGOFF_IN    = 7;   // キルスイッチ入力
@@ -108,6 +110,7 @@ uint32_t pauseTotalMs   = 0;
 uint32_t lastProgMs     = 0;
 bool     pauseReported  = false;
 bool     starterReleased = false;  // 起動時に押されたままでも、一度離すまで開始しない
+uint32_t starterLastLowMs = 0;     // スタータボタンが最後に押されていた（LOWだった）時刻
 bool     cfgPrinted      = false;  // この行の処理中に #INJ,CFG を出したか
 
 String rxLine;
@@ -478,7 +481,11 @@ void setup() {
   AGTimer.init(ROUTINE_CYCLE_US, Routine);
   AGTimer.start();
 
-  delay(300);
+  // USBシリアルはPCがポートを開くまで送信が捨てられるので、起動表示が消えないよう接続を待つ。
+  // PCがつながっていなくても SERIAL_WAIT_MS で先へ進む（試験の開始は ? で設定を読み直せばよい）。
+  uint32_t t0 = millis();
+  while (!Serial && millis() - t0 < SERIAL_WAIT_MS) {}
+  delay(100);
   Serial.println(F("=== インジェクタ特性試験モード（第2版） ==="));
   printHelp();
 }
@@ -488,16 +495,23 @@ void loop() {
 
   RunState st = runState;
 
-  // 従来どおり、キルスイッチOFF(導通) + スタータボタン押下(導通)でも開始できる
+  uint32_t nowMs = millis();
+
+  // 従来どおり、キルスイッチOFF(導通) + スタータボタン押下(導通)でも開始できる。
+  // 押した瞬間のチャタリングで一瞬HIGHになっただけでは「離した」と見なさない
+  // （見なすと、押したままでもバースト終了のたびに再開始してしまう）。
   bool starter = (digitalRead(STR_IN) == LOW);
-  if (!starter) starterReleased = true;
+  if (starter) {
+    starterLastLowMs = nowMs;
+  } else if (nowMs - starterLastLowMs >= STARTER_RELEASE_MS) {
+    starterReleased = true;
+  }
   if (st == ST_IDLE && starter && starterReleased && isArmed()) {
     starterReleased = false;   // 離されるまで再トリガしない
     startBurst(cfgCount, false);
     st = runState;
+    nowMs = millis();          // startBurst が lastProgMs を更新するので、それより前の時刻を使わない
   }
-
-  uint32_t nowMs = millis();
 
   if (st == ST_OFF || st == ST_ON) {
     if (!runIsPrime && nowMs - lastProgMs >= PROG_INTERVAL_MS) {

@@ -3,7 +3,8 @@
 
 試験ファーム（src/injector_test.cpp 第2版）へ設定を送り、噴射中の燃圧を
 Chibi-T_Furoshiki_AutoAirAdjust（sensing-only ビルド）のUSBシリアルから記録し、
-必要ならRIGOL DHO804で1発分の波形を撮る。重量は目視の値をキーボードから入力する。
+必要ならRIGOL DHO804で1発分の波形を撮る。重量は --scale-port で MT シリーズ精密はかりから自動で読む
+（指定しなければ、目視の値をキーボードから入力する）。
 
   # 1バーストだけ実行（4ms x 750発、周期50ms）
   python tools/inj_bench.py run --ecu-port /dev/cu.usbmodem101 --fuel-port /dev/cu.usbserial-XXXX --pw-ms 4 --n 750 \
@@ -163,6 +164,88 @@ class FuelMonitor(threading.Thread):
         now = time.monotonic()
         w = self.window(now - seconds, now)
         return sum(w) / len(w) if w else None
+
+
+class ScaleMonitor(threading.Thread):
+    """MT シリーズ精密はかり（RS232C、連続出力モード）の出力を読み、安定した重量を答える。
+
+    出力は '\\n\\r' 区切りで、1行 = 右詰め8文字・小数3桁・単位なし（例 '  10.022'、' -20.014'）。
+    約7行/秒。安定マークは出ないので、直近の数行の幅で安定を判定する。
+    受信の断片（先頭や途中で切れた行）を値と取り違えないよう、行末まで届いた8文字の行だけを採用する。
+    はかりの UNIT キーで単位を変えると g 以外の値がそのまま流れる（単位文字が出ない）。計測中は触らないこと。
+    """
+
+    LINE = re.compile(r"^ *-?\d+\.\d{3}$")
+
+    def __init__(self, ser, stable_lines=10, stable_span_s=2.0, tol_g=0.005):
+        super().__init__(daemon=True)
+        self.ser = ser
+        self.stable_lines = stable_lines      # この行数がそろい、
+        self.stable_span_s = stable_span_s    # かつ全部が直近この秒数に入っていて、
+        self.tol_g = tol_g                    # かつ最大−最小がこの値以下なら安定
+        self.samples = collections.deque(maxlen=5000)   # (monotonic秒, g)
+        self._buf = b""
+        self._halt = threading.Event()
+
+    def feed(self, data, now):
+        """受信バイト列を行に切って samples に積む（スレッドからも、単体試験からも使う）。"""
+        self._buf += data
+        parts = re.split(rb"[\r\n]+", self._buf)
+        self._buf = parts.pop()               # 行末が来ていない最後の断片は次回へ
+        for p in parts:
+            s = p.decode("ascii", "replace")
+            if len(s) == 8 and self.LINE.match(s):
+                self.samples.append((now, float(s)))
+        if len(self._buf) > 64:               # 区切りが来ない異常出力でバッファが膨らまないように
+            self._buf = b""
+
+    def run(self):
+        while not self._halt.is_set():
+            try:
+                data = self.ser.read(256)
+            except Exception:
+                break
+            if data:
+                self.feed(data, time.monotonic())
+
+    def stop(self):
+        self._halt.set()
+
+    def latest(self, max_age_s=1.0, now=None):
+        now = time.monotonic() if now is None else now
+        if self.samples and now - self.samples[-1][0] <= max_age_s:
+            return self.samples[-1][1]
+        return None
+
+    def wait_valid(self, timeout=5.0):
+        t_end = time.monotonic() + timeout
+        while time.monotonic() < t_end:
+            if self.latest() is not None:
+                return True
+            time.sleep(0.1)
+        return False
+
+    def stable_value(self, now=None):
+        """安定していれば直近 stable_lines 行の平均 g、そうでなければ None。"""
+        now = time.monotonic() if now is None else now
+        recent = [(t, v) for t, v in list(self.samples)[-self.stable_lines:]]
+        if len(recent) < self.stable_lines or now - recent[-1][0] > 1.0:
+            return None
+        if recent[-1][0] - recent[0][0] > self.stable_span_s:
+            return None
+        vals = [v for _, v in recent]
+        if max(vals) - min(vals) > self.tol_g:
+            return None
+        return sum(vals) / len(vals)
+
+    def wait_stable(self, timeout):
+        t_end = time.monotonic() + timeout
+        while time.monotonic() < t_end:
+            v = self.stable_value()
+            if v is not None:
+                return v
+            time.sleep(0.1)
+        return None
 
 
 class PumpMonitor(threading.Thread):
@@ -387,6 +470,45 @@ def ask_float(prompt, default=None, allow_skip=False):
             print("  数値を入力してください" + ("（無効にするなら x）" if allow_skip else ""))
 
 
+def read_weight(ctx, label, default=None, allow_skip=False):
+    """重量[g]を得る。はかり（--scale-port）があれば安定値を自動で読み、Enter で採用・数値で上書き。
+
+    はかりが無い、または読めないときは従来どおりキーボード入力。
+    """
+    scale = ctx.get("scale")
+    hint = "（無効にするなら x）" if allow_skip else ""
+    if scale is None:
+        d = "（Enterで0.00）" if default is not None else ""
+        return ask_float(f"  {label}[g]{d}{hint}: ", default=default, allow_skip=allow_skip)
+
+    a = ctx["args"]
+    while True:
+        print(f"  {label}: はかりの安定を待っています（最大{a.scale_timeout:.0f}秒）...", end="", flush=True)
+        v = scale.wait_stable(a.scale_timeout)
+        stable = v is not None
+        if not stable:
+            v = scale.latest()
+        print("\r" + " " * 60 + "\r", end="")
+        if v is None:
+            print(f"  {label}: はかりから値が来ません。キーボードから入力してください")
+            return ask_float(f"  {label}[g]{hint}: ", default=default, allow_skip=allow_skip)
+        state = "安定" if stable else "不安定（まだ動いています）"
+        s = input(f"  {label}: {v:.3f} g（{state}）  Enterで採用 / 数値で上書き / r で再読み取り{hint}: ").strip()
+        if s == "":
+            if stable:
+                return round(v, 3)
+            print("  不安定なため採用しません。安定してから Enter を押すか、数値を入力してください")
+            continue
+        if s.lower() == "r":
+            continue
+        if allow_skip and s.lower() in ("x", "skip"):
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            print("  数値、Enter、r のいずれかを入力してください")
+
+
 def pick_sub_count(pw_us, n, max_ml, density):
     """ポンプ容量を超えないよう、1回分の発数を決める（分割不要なら 0）。"""
     if not max_ml or max_ml <= 0:
@@ -454,7 +576,7 @@ def do_burst(ctx, job):
     if a.simulate:
         w_start = 0.0
     else:
-        w_start = ask_float("  開始重量[g]（Enterで0.00）: ", default=0.0)
+        w_start = read_weight(ctx, "開始重量", default=0.0)
 
     # オシロ: first は開始前にアーム、last は終わり際にアーム
     shot = job.get("scope_shot", "none")
@@ -536,7 +658,7 @@ def do_burst(ctx, job):
         w_end = fake_scale(float(done.get("w_mean_us", pw_us)), n_fired)
         print(f"  終了重量[g]（擬似）: {w_end:.2f}")
     else:
-        w_end = ask_float("  終了重量[g]（無効にするなら x）: ", allow_skip=True)
+        w_end = read_weight(ctx, "終了重量", allow_skip=True)
 
     time.sleep(0.8 if fuel else 0)       # バースト後の燃圧を1点取る
     p_after = fuel.recent_mean(0.8) if fuel else None
@@ -550,7 +672,7 @@ def do_burst(ctx, job):
         "パルス幅_ms": fmt(pw_us / 1000.0, 3), "パルス数_N": n,
         "パルス間隔_ms": fmt(a.period_ms - pw_us / 1000.0, 3), "反復回数": job.get("rep", ""),
         "バースト前燃圧_MPa": fmt(p_before, 4), "バースト後燃圧_MPa": fmt(p_after, 4),
-        "開始重量_g": fmt(w_start, 2), "終了重量_g": fmt(w_end, 2), "噴射質量_g": fmt(mass, 2),
+        "開始重量_g": fmt(w_start, 3), "終了重量_g": fmt(w_end, 3), "噴射質量_g": fmt(mass, 3),
         "密度_g/ml": fmt(a.density, 4),
         "噴射体積_ml": fmt(mass / a.density, 3) if mass is not None else "",
         "備考": job.get("note", ""), "Serialコマンド": cmd,
@@ -686,7 +808,7 @@ def load_plan(path, phases):
 
 
 def open_devices(a):
-    ctx = {"args": a, "ecu": None, "fuel": None, "scope": None, "pump": None, "_close": []}
+    ctx = {"args": a, "ecu": None, "fuel": None, "scope": None, "pump": None, "scale": None, "_close": []}
     pser, pump_scale = None, 1.0
     if a.simulate:
         ser = FakeEcuSerial()
@@ -745,6 +867,21 @@ def open_devices(a):
     else:
         print("ポンプポートの指定なし: ポンプ周期には同期しません（加圧が抜ける Lo 区間にも噴きます）")
 
+    if a.scale_port and not a.simulate:
+        import serial
+        sser = serial.Serial(a.scale_port, a.scale_baud, 8, "N", 1, timeout=0.2)
+        ctx["_close"].append(sser)
+        sm = ScaleMonitor(sser, tol_g=a.scale_tol)
+        sm.start()
+        if not sm.wait_valid(5.0):
+            raise SystemExit("はかりから値が来ません。連続出力モード（09-odE=3）、ボーレート、"
+                             "クロスケーブルを確認してください")
+        print(f"はかり: {sm.latest():.3f} g（安定判定: {sm.stable_lines}行で幅{a.scale_tol:g}g以内。"
+              "計測中は UNIT キーを押さないこと）")
+        ctx["scale"] = sm
+    elif not a.simulate:
+        print("はかりポートの指定なし: 重量はキーボードから入力します")
+
     if a.scope != "none" and not a.simulate:
         import inj_scope
         ctx["scope"] = inj_scope.Scope(a.scope_resource, inj_scope.channels_from_args(a), a.trig_level)
@@ -757,6 +894,8 @@ def close_devices(ctx):
         ctx["fuel"].stop()
     if ctx.get("pump"):
         ctx["pump"].stop()
+    if ctx.get("scale"):
+        ctx["scale"].stop()
     if ctx.get("scope"):
         ctx["scope"].close()
     for s in ctx["_close"]:
@@ -816,6 +955,11 @@ def add_common(p):
                    help="ポンプが Hi に入ってから噴き始めるまでの待ち秒数（再加圧後の整定。既定 1.0）")
     p.add_argument("--pump-margin-s", type=float, default=0.5,
                    help="ポンプが Lo に入る何秒前までに噴き終えるか（既定 0.5）")
+    p.add_argument("--scale-port", help="MT シリーズ精密はかり（RS232C-USB）のシリアルポート。"
+                   "指定すると重量を自動で読む（省略時はキーボード入力）。はかりは連続出力モード（09-odE=3）、クロスケーブル")
+    p.add_argument("--scale-baud", type=int, default=9600, help="はかりのボーレート（既定 9600）")
+    p.add_argument("--scale-tol", type=float, default=0.005, help="安定とみなす直近10行の最大−最小 g（既定 0.005）")
+    p.add_argument("--scale-timeout", type=float, default=30.0, help="安定を待つ最大秒数（既定 30）")
     p.add_argument("--out", required=True, help="結果を追記するCSV")
     p.add_argument("--period-ms", type=int, default=50, help="周期 ms（ONからON。既定 50）")
     p.add_argument("--prime", type=int, default=20, help="計量前の捨て打ち発数（0で無効。既定 20）")

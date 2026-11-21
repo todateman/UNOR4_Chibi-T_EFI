@@ -229,6 +229,42 @@ def main():
             table.append({"p_mpa": round(p, 4), "rows": len(grp), "flow_mg_per_ms": round(float(q.mean()), 5)})
         out["flow_by_pressure"] = table
 
+    # --- 燃圧別に流量と t0 を両方求める（同じ燃圧で PW が 2 水準以上ある場合。P4b）---
+    # t0 を共通とした上の表では、燃圧で流量が変わるのか t0 が変わるのかを分けられないため
+    if pgroups and not a.pnorm:
+        sep = []
+        for p, grp in pgroups:
+            g = [r for r in grp if a.pw_min - 1e-9 <= r["pw_cmd"] <= a.pw_max + 1e-9]
+            if len({r["pw_cmd"] for r in g}) < 2:
+                continue
+            c, cov, sd = fit(g, False)
+            ga, gb = float(c[0]), float(c[1])
+            # t0 = -b/a の標準誤差（デルタ法）
+            var = (gb ** 2 * cov[0, 0] + ga ** 2 * cov[1, 1] - 2 * ga * gb * cov[0, 1]) / ga ** 4
+            sep.append({"p_mpa": round(p, 4), "rows": len(g), "pw_levels": sorted({r["pw_cmd"] for r in g}),
+                        "flow_mg_per_ms": round(ga, 5), "flow_se": round(float(cov[0, 0]) ** 0.5, 5),
+                        "t0_ms": round(-gb / ga, 4), "t0_se": round(max(var, 0.0) ** 0.5, 4),
+                        "resid_mg": round(sd, 1)})
+        if sep:
+            print("\n== 燃圧ごとの流量と実効オフセット（同じ燃圧で PW を 2 水準以上振った行。固定量 C は 0）==")
+            print("  燃圧[MPa] 行数  PW水準[ms]        流量[mg/ms]        t0[ms]           残差[mg]")
+            for s in sep:
+                lv = ",".join(f"{x:g}" for x in s["pw_levels"])
+                print(f"{s['p_mpa']:9.3f} {s['rows']:5d}  {lv:16s} {s['flow_mg_per_ms']:.4f}±{s['flow_se']:.4f}"
+                      f"   {s['t0_ms']:+.3f}±{s['t0_se']:.3f}   {s['resid_mg']:8.1f}")
+            if len(sep) >= 2:
+                lp = np.log([s["p_mpa"] for s in sep])
+                la = np.log([s["flow_mg_per_ms"] for s in sep])
+                k_a = float(np.polyfit(lp, la, 1)[0])
+                ps = np.array([s["p_mpa"] for s in sep])
+                dt0 = float(np.polyfit(ps, [s["t0_ms"] for s in sep], 1)[0])
+                print(f"  流量の燃圧依存: a ∝ P^{k_a:.3f}（√P 則なら 0.5）")
+                print(f"  t0 の燃圧依存 : {dt0:+.2f} ms/MPa（燃圧 0.1 MPa あたり {dt0 * 0.1:+.3f} ms）")
+                out["flow_t0_by_pressure"] = {"levels": sep, "flow_exponent": round(k_a, 4),
+                                              "t0_slope_ms_per_mpa": round(dt0, 4)}
+            else:
+                out["flow_t0_by_pressure"] = {"levels": sep}
+
     print("\n== ECU（gasml計算）に入れる値 ==")
     print(f"  flow_ml_per_us = {ka / a.density / 1e6:.4e}   // {ka:.4f} mg/ms ÷ 密度{a.density} ÷ 1e6")
     print(f"  t_offset_us    = {t0 * 1000:+.0f}            // 符号付き。噴射量 = flow × (PW − t_offset)")

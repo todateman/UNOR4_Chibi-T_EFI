@@ -47,7 +47,7 @@ LOG_COLUMNS = [
     "周期_最小_us", "周期_最大_us", "所要時間_s", "待ち時間_s", "中断",
     "燃圧平均_MPa", "燃圧最小_MPa", "燃圧最大_MPa", "燃圧サンプル数",
     "ポンプ同期", "ポンプ_Hi_ms", "ポンプ_PWM_ms", "ポンプ_Lo_ms", "ポンプ_Duty_%",
-    "オシロ_取得位置", "オシロ_電源電圧_V", "オシロ_端子パルス幅_ms", "オシロ_指令幅_ms",
+    "オシロ_取得位置", "オシロ_電源電圧_V", "オシロ_通電終了前電圧_V", "オシロ_端子パルス幅_ms", "オシロ_指令幅_ms",
     "オシロ_ON遅れ_us", "オシロ_OFF遅れ_us", "オシロ_フライバック最大_V", "オシロ_フライバック継続_ms",
     "オシロ_クランプ種別", "オシロ_電流ピーク_A", "オシロ_電流減衰_ms", "オシロ_開弁キンク_ms",
     "波形ファイル",
@@ -724,6 +724,7 @@ def do_burst(ctx, job):
                 vbat = res.get("vbat_v", vbat)
                 row.update({
                     "オシロ_取得位置": shot, "オシロ_電源電圧_V": fmt(res.get("vbat_v")),
+                    "オシロ_通電終了前電圧_V": fmt(res.get("v_load_v")),
                     "オシロ_端子パルス幅_ms": fmt(res.get("term_width_ms"), 4),
                     "オシロ_指令幅_ms": fmt(res.get("cmd_width_ms"), 4),
                     "オシロ_ON遅れ_us": fmt(res.get("on_delay_us"), 1),
@@ -884,7 +885,7 @@ def open_devices(a):
 
     if a.scope != "none" and not a.simulate:
         import inj_scope
-        ctx["scope"] = inj_scope.Scope(a.scope_resource, inj_scope.channels_from_args(a), a.trig_level)
+        ctx["scope"] = inj_scope.Scope(a.scope_resource, inj_scope.channels_from_args(a), a.trig_level, a.drive)
         print("オシロ:", ctx["scope"].idn())
     return ctx
 

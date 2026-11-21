@@ -225,11 +225,17 @@ class ScaleMonitor(threading.Thread):
             time.sleep(0.1)
         return False
 
-    def stable_value(self, now=None):
-        """安定していれば直近 stable_lines 行の平均 g、そうでなければ None。"""
+    def stable_value(self, now=None, after=None):
+        """安定していれば直近 stable_lines 行の平均 g、そうでなければ None。
+
+        after（monotonic秒）を渡すと、その時刻より後に受信した行だけで判定する。
+        はかりの表示は載った重量に遅れて追いつくので、噴射直後の古い値を「安定」と取り違えないようにする。
+        """
         now = time.monotonic() if now is None else now
         recent = [(t, v) for t, v in list(self.samples)[-self.stable_lines:]]
         if len(recent) < self.stable_lines or now - recent[-1][0] > 1.0:
+            return None
+        if after is not None and recent[0][0] < after:
             return None
         if recent[-1][0] - recent[0][0] > self.stable_span_s:
             return None
@@ -238,10 +244,10 @@ class ScaleMonitor(threading.Thread):
             return None
         return sum(vals) / len(vals)
 
-    def wait_stable(self, timeout):
+    def wait_stable(self, timeout, after=None):
         t_end = time.monotonic() + timeout
         while time.monotonic() < t_end:
-            v = self.stable_value()
+            v = self.stable_value(after=after)
             if v is not None:
                 return v
             time.sleep(0.1)
@@ -470,9 +476,10 @@ def ask_float(prompt, default=None, allow_skip=False):
             print("  数値を入力してください" + ("（無効にするなら x）" if allow_skip else ""))
 
 
-def read_weight(ctx, label, default=None, allow_skip=False):
+def read_weight(ctx, label, default=None, allow_skip=False, since=None):
     """重量[g]を得る。はかり（--scale-port）があれば安定値を自動で読み、Enter で採用・数値で上書き。
 
+    since: 直前の噴射が終わった時刻（monotonic秒）。そこから --scale-settle-s 経った後の行だけで安定を判定する。
     はかりが無い、または読めないときは従来どおりキーボード入力。
     """
     scale = ctx.get("scale")
@@ -484,7 +491,8 @@ def read_weight(ctx, label, default=None, allow_skip=False):
     a = ctx["args"]
     while True:
         print(f"  {label}: はかりの安定を待っています（最大{a.scale_timeout:.0f}秒）...", end="", flush=True)
-        v = scale.wait_stable(a.scale_timeout)
+        after = since + a.scale_settle_s if since is not None else None
+        v = scale.wait_stable(a.scale_timeout + (a.scale_settle_s if since is not None else 0.0), after=after)
         stable = v is not None
         if not stable:
             v = scale.latest()
@@ -571,12 +579,15 @@ def do_burst(ctx, job):
         ecu.send(f"Q{a.prime}")
         ecu.wait_for({"START"}, 3.0)
         ecu.wait_for({"DONE"}, a.prime * a.period_ms / 1000.0 + 5.0)
+        t_prime = time.monotonic()
         print(f"  捨て打ち {a.prime}発 完了")
+    else:
+        t_prime = None
 
     if a.simulate:
         w_start = 0.0
     else:
-        w_start = read_weight(ctx, "開始重量", default=0.0)
+        w_start = read_weight(ctx, "開始重量", default=0.0, since=t_prime)
 
     # オシロ: first は開始前にアーム、last は終わり際にアーム
     shot = job.get("scope_shot", "none")
@@ -658,7 +669,7 @@ def do_burst(ctx, job):
         w_end = fake_scale(float(done.get("w_mean_us", pw_us)), n_fired)
         print(f"  終了重量[g]（擬似）: {w_end:.2f}")
     else:
-        w_end = read_weight(ctx, "終了重量", allow_skip=True)
+        w_end = read_weight(ctx, "終了重量", allow_skip=True, since=t_done)
 
     time.sleep(0.8 if fuel else 0)       # バースト後の燃圧を1点取る
     p_after = fuel.recent_mean(0.8) if fuel else None
@@ -961,6 +972,8 @@ def add_common(p):
     p.add_argument("--scale-baud", type=int, default=9600, help="はかりのボーレート（既定 9600）")
     p.add_argument("--scale-tol", type=float, default=0.005, help="安定とみなす直近10行の最大−最小 g（既定 0.005）")
     p.add_argument("--scale-timeout", type=float, default=30.0, help="安定を待つ最大秒数（既定 30）")
+    p.add_argument("--scale-settle-s", type=float, default=2.0,
+                   help="噴射が終わってから、はかりの値を安定判定に使い始めるまでの秒数（既定 2.0）")
     p.add_argument("--out", required=True, help="結果を追記するCSV")
     p.add_argument("--period-ms", type=int, default=50, help="周期 ms（ONからON。既定 50）")
     p.add_argument("--prime", type=int, default=20, help="計量前の捨て打ち発数（0で無効。既定 20）")

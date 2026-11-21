@@ -51,6 +51,8 @@ LOG_COLUMNS = [
     "オシロ_ON遅れ_us", "オシロ_OFF遅れ_us", "オシロ_フライバック最大_V", "オシロ_フライバック継続_ms",
     "オシロ_クランプ種別", "オシロ_電流ピーク_A", "オシロ_電流減衰_ms", "オシロ_開弁キンク_ms",
     "波形ファイル",
+    # 暖機（--warmup）とコイル抵抗（温度の目安）
+    "オシロ_コイル抵抗_ohm", "暖機発数", "暖機パルス幅_ms", "暖機後コイル抵抗_ohm", "暖機波形ファイル",
 ]
 
 # 分割発数の目安に使う1発あたり噴射量の概算式（2026-08-22ログ PW=1〜6ms の回帰）
@@ -535,10 +537,63 @@ def fmt(v, nd=3):
     return f"{v:.{nd}f}" if isinstance(v, float) else str(v)
 
 
+def do_warmup(ctx, job):
+    """計量の前に、決まったパルス幅で噴いてインジェクタを温める（行ごとに同じ温度状態から始めるため）。
+
+    最後の方の1発をオシロで撮り、コイル抵抗（温度の目安）を返す。噴いた燃料は開始重量に含まれるので計量に影響しない。
+    戻り値: dict(n, pw_ms, coil_r_ohm, wave)。
+    """
+    a, ecu, scope = ctx["args"], ctx["ecu"], ctx["scope"]
+    wus = int(round(a.warmup_pw_ms * 1000))
+    n = a.warmup
+    _, armed = ecu.configure(wus, n, a.period_ms, 0, 0)
+    if not armed:
+        input("  キルスイッチがOFF(導通)になっていません。操作してから Enter: ")
+    ecu.drain(0.1)
+    ecu.send("G")
+    ecu.wait_for({"START"}, 3.0)
+    arm_at = max(1, n - max(3, math.ceil(1.0 / (a.period_ms / 1000.0))))
+    armed_scope = False
+    deadline = time.monotonic() + n * a.period_ms / 1000.0 * 1.5 + 30.0
+    done = None
+    while done is None:
+        if time.monotonic() > deadline:
+            raise TimeoutError("暖機が終わりません（#INJ,DONE が来ない）")
+        ev = ecu.read_event(0.5)
+        if ev is None:
+            continue
+        kind, kv = ev
+        if kind == "ERR":
+            raise RuntimeError(f"試験ファームがエラーを返しました: {kv.get('msg')}")
+        if kind == "PROG":
+            fired = int(kv.get("fired", 0))
+            print(f"\r  暖機中... {fired}/{n}", end="", flush=True)
+            if scope and not armed_scope and fired >= arm_at:
+                scope.arm(wus / 1000.0)
+                armed_scope = True
+        elif kind == "DONE" and kv.get("kind") == "burst":
+            done = kv
+    if done.get("abort", "none") != "none":
+        raise RuntimeError(f"暖機が中断されました（{done.get('abort')}）")
+    out = {"n": int(done["n_fired"]), "pw_ms": wus / 1000.0, "coil_r_ohm": None, "wave": ""}
+    if scope and armed_scope and scope.wait(5.0):
+        import inj_scope
+        wave = scope.read()
+        os.makedirs(a.wave_dir, exist_ok=True)
+        path = os.path.join(a.wave_dir, f"{time.strftime('%Y%m%d_%H%M%S')}_no{job['no']}_warmup_{wus}us.npz")
+        inj_scope.save_wave(path, wave)
+        res = inj_scope.analyze(wave, cur_a_per_v=a.cur_a_per_v)
+        out["coil_r_ohm"], out["wave"] = res.get("coil_r_ohm"), path
+    r = f", コイル抵抗 {out['coil_r_ohm']}Ω" if out["coil_r_ohm"] is not None else ""
+    print(f"\r  暖機 {wus}us x {out['n']}発 完了{r}          ")
+    return out
+
+
 def do_burst(ctx, job):
     """job: dict(no, phase, rep, pw_us, n, target_mpa, target_v, note)。CSVの1行(dict)を返す。"""
     a, ecu, fuel, scope, pump = ctx["args"], ctx["ecu"], ctx["fuel"], ctx["scope"], ctx.get("pump")
     pw_us, n = job["pw_us"], job["n"]
+    warm = do_warmup(ctx, job) if a.warmup > 0 else None
     sub = a.sub if a.sub is not None else pick_sub_count(pw_us, n, a.max_burst_ml, a.density)
     resume = "pump" if pump else a.resume
     if pump:
@@ -746,11 +801,15 @@ def do_burst(ctx, job):
                     "オシロ_電流ピーク_A": fmt(res.get("i_peak_a"), 3),
                     "オシロ_電流減衰_ms": fmt(res.get("i_decay_ms"), 3),
                     "オシロ_開弁キンク_ms": fmt(res.get("open_kink_ms"), 3),
+                    "オシロ_コイル抵抗_ohm": fmt(res.get("coil_r_ohm"), 3),
                 })
             row["波形ファイル"] = path
         else:
             print("  オシロがトリガーされませんでした（トリガーレベル・接続を確認）")
     row["バッテリー電圧_V"] = fmt(vbat, 2) if vbat is not None else ""
+    if warm:
+        row.update({"暖機発数": warm["n"], "暖機パルス幅_ms": fmt(warm["pw_ms"], 3),
+                    "暖機後コイル抵抗_ohm": fmt(warm["coil_r_ohm"], 3), "暖機波形ファイル": warm["wave"]})
 
     if mass is not None and n_fired:
         print(f"  噴射質量 {mass:.2f}g → 1発あたり {mass / n_fired * 1000:.3f}mg")
@@ -972,11 +1031,14 @@ def add_common(p):
     p.add_argument("--scale-baud", type=int, default=9600, help="はかりのボーレート（既定 9600）")
     p.add_argument("--scale-tol", type=float, default=0.005, help="安定とみなす直近10行の最大−最小 g（既定 0.005）")
     p.add_argument("--scale-timeout", type=float, default=30.0, help="安定を待つ最大秒数（既定 30）")
-    p.add_argument("--scale-settle-s", type=float, default=2.0,
-                   help="噴射が終わってから、はかりの値を安定判定に使い始めるまでの秒数（既定 2.0）")
+    p.add_argument("--scale-settle-s", type=float, default=3.0,
+                   help="噴射が終わってから、はかりの値を安定判定に使い始めるまでの秒数（既定 3.0）")
     p.add_argument("--out", required=True, help="結果を追記するCSV")
     p.add_argument("--period-ms", type=int, default=50, help="周期 ms（ONからON。既定 50）")
     p.add_argument("--prime", type=int, default=20, help="計量前の捨て打ち発数（0で無効。既定 20）")
+    p.add_argument("--warmup", type=int, default=0,
+                   help="各行の前に噴く暖機の発数（0で無効）。インジェクタの温度状態を行ごとにそろえる。例: 600")
+    p.add_argument("--warmup-pw-ms", type=float, default=4.0, help="暖機のパルス幅 ms（既定 4.0）")
     p.add_argument("--max-burst-ml", type=float, default=1.5,
                    help="1回に連続で噴く量の上限 ml（ポンプ容量2ccに対する余裕。これを超える分は分割。既定 1.5）")
     p.add_argument("--sub", type=int, default=None, help="分割1回分の発数を直接指定（0で分割なし）")

@@ -287,6 +287,15 @@ def analyze(wave, cur_a_per_v=1.0, fuel_v0=0.5, fuel_v_full=4.5, fuel_mpa_full=1
         else:
             res["i_decay_ms"] = None
         res["open_kink_ms"] = _open_kink(s, dt, i_on, i_off)
+        # コイル抵抗（温度の目安。銅線なら約0.39%/K）: 電流が飽和した通電終了前 0.5ms の 電圧÷電流。
+        # 電流が飽和しない短いパルス（2ms未満）では出さない
+        res["coil_r_ohm"] = None
+        if t_off - t_on >= 2.0:
+            win = slice(max(i_on, i_off - int(0.5e-3 / dt)), i_off - w20us)
+            i_pl = float(np.mean(s[win]))
+            v_coil = float(np.mean(v[win])) - idle if drive == "high" else idle - float(np.mean(v[win]))
+            if i_pl > 0.1:
+                res["coil_r_ohm"] = round(v_coil / i_pl, 3)
 
     # --- 燃圧センサ ---
     if "fuel" in wave:
@@ -354,7 +363,8 @@ def describe(res):
     if "i_peak_a" in res:
         decay = f"{res['i_decay_ms']}ms" if res["i_decay_ms"] is not None else "窓内で減衰せず"
         kink = f"{res['open_kink_ms']}ms（参考）" if res["open_kink_ms"] is not None else "検出なし"
-        out.append(f"電流ピーク {res['i_peak_a']}A, OFF後5%まで {decay}, 開弁キンク {kink}")
+        coil = f", コイル抵抗 {res['coil_r_ohm']}Ω" if res.get("coil_r_ohm") is not None else ""
+        out.append(f"電流ピーク {res['i_peak_a']}A, OFF後5%まで {decay}, 開弁キンク {kink}{coil}")
     if "fuel_pre_mpa" in res:
         out.append(f"燃圧 通電前 {res['fuel_pre_mpa']}MPa / 最小 {res['fuel_min_mpa']}MPa")
     return out
